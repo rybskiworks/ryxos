@@ -24,6 +24,19 @@
       };
       mkSystem = import ./lib/mk-system.nix { inherit baseModule; };
       xenLab = import ./tests/xen { inherit nixpkgs pkgs baseModule; };
+      labRunner = pkgs.writeShellApplication {
+        name = "ryxos-lab-run";
+        runtimeInputs = [
+          pkgs.python3
+          pkgs.systemd
+          pkgs.util-linux
+          pkgs.coreutils
+          pkgs.lix
+        ];
+        text = ''
+          exec python3 ${./scripts}/lab-supervisor.py "$@"
+        '';
+      };
       example =
         modules:
         mkSystem {
@@ -42,6 +55,7 @@
         xenHost = import ./profiles/xen-host.nix;
         xenGuest = import ./profiles/xen-guest.nix;
         xenDomains = import ./modules/xen-domains.nix;
+        xenControl = import ./modules/xen-control.nix;
       };
       lib = { inherit mkSystem; };
       nixosConfigurations = {
@@ -66,6 +80,19 @@
         ];
       };
       packages.${system} = {
+        lab-runner = labRunner;
+        xen-hvm-smoke = pkgs.writeShellApplication {
+          name = "xen-hvm-smoke";
+          text = ''
+            if [[ $# != 1 ]]; then
+              echo "usage: xen-hvm-smoke EVIDENCE_DIRECTORY" >&2
+              exit 2
+            fi
+            exec ${labRunner}/bin/ryxos-lab-run \
+              --driver ${xenLab.tests.hvm.driver}/bin/nixos-test-driver \
+              --output-dir "$1" --memory-mib 6144 --qemu-overhead-mib 2048 --vcpus 4
+          '';
+        };
         xen-lab-preflight = pkgs.writeShellApplication {
           name = "xen-lab-preflight";
           runtimeInputs = [
@@ -87,9 +114,19 @@
         xen-experimental-pvh-nested-test = xenLab.tests.experimentalPvhNested;
         default = self.packages.${system}.preview;
       };
-      apps.${system}.xen-lab-preflight = {
-        type = "app";
-        program = "${self.packages.${system}.xen-lab-preflight}/bin/xen-lab-preflight";
+      apps.${system} = {
+        xen-lab-preflight = {
+          type = "app";
+          program = "${self.packages.${system}.xen-lab-preflight}/bin/xen-lab-preflight";
+        };
+        lab-runner = {
+          type = "app";
+          program = "${labRunner}/bin/ryxos-lab-run";
+        };
+        xen-hvm-smoke = {
+          type = "app";
+          program = "${self.packages.${system}.xen-hvm-smoke}/bin/xen-hvm-smoke";
+        };
       };
       checks.${system} = {
         lab-preflight =
@@ -105,6 +142,7 @@
           touch "$out"
         '';
         xen-domains = import ./tests/xen-domains.nix { inherit pkgs; };
+        xen-control = import ./tests/xen-control.nix { inherit pkgs; };
         xen-dom0 = xenLab.tests.dom0;
         xen-hvm = xenLab.tests.hvm;
         leaf = import ./tests/leaf.nix {
