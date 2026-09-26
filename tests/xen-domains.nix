@@ -32,31 +32,27 @@ let
   valid = evaluate { };
   disabled = evaluate { ryxos.xenDomains.enable = lib.mkForce false; };
   automatic = evaluate { ryxos.xenDomains.domains.sample.autoStart = true; };
-  twoAutomatic = evaluate {
-    ryxos.xenDomains.domains = {
-      sample.autoStart = true;
-      second = sample // {
-        uuid = "e3f70b01-3a87-4b5a-a77e-6238f6b78123";
-        autoStart = true;
-      };
-    };
-  };
   duplicate = evaluate { ryxos.xenDomains.domains.second = sample; };
   twoManual = evaluate {
     ryxos.xenDomains.domains.second = sample // {
       uuid = "e3f70b01-3a87-4b5a-a77e-6238f6b78123";
     };
   };
-  threeManual = evaluate {
-    ryxos.xenDomains.domains = {
-      second = sample // {
-        uuid = "e3f70b01-3a87-4b5a-a77e-6238f6b78123";
-      };
-      third = sample // {
-        uuid = "d3f70b01-3a87-4b5a-a77e-6238f6b78123";
-      };
+  managed = evaluate {
+    ryxos.xenDomains.domains.sample = {
+      disposableImage = pkgs.writeText "synthetic.raw" "synthetic raw image";
+      retainPaths = [ pkgs.hello ];
+      # This evaluation-only fixture checks importing a local file as a path.
+      configFile = lib.mkForce ./test_xen_domain.py;
     };
   };
+  specification = configuration: configuration.environment.etc."ryxos/xen-domains/sample.json".source;
+  parsed =
+    configuration:
+    builtins.fromJSON (builtins.unsafeDiscardStringContext (specification configuration).text);
+  declaredInventory = builtins.fromJSON (
+    builtins.unsafeDiscardStringContext valid.environment.etc."ryxos/xen-domains.json".source.text
+  );
   xenDisabled = evaluate { virtualisation.xen.enable = lib.mkForce false; };
   legacyEnabled = evaluate { systemd.services.xendomains.enable = lib.mkForce true; };
   assertionsFor =
@@ -81,22 +77,43 @@ let
     (!(disabled.systemd.services ? ryxos-xen-sample))
     (valid.systemd.services.ryxos-xen-sample.wantedBy == [ ])
     (automatic.systemd.services.ryxos-xen-sample.wantedBy == [ "multi-user.target" ])
-    (builtins.elem "ryxos-xen-sample.service" twoAutomatic.systemd.services.ryxos-xen-second.after)
-    (builtins.elem "ryxos-xen-sample.service" twoManual.systemd.services.ryxos-xen-second.after)
+    # Independent domain locks allow concurrent services without peer coupling.
+    (!(builtins.elem "ryxos-xen-sample.service" twoManual.systemd.services.ryxos-xen-second.after))
     (twoManual.systemd.services.ryxos-xen-second.wantedBy == [ ])
     (!(builtins.elem "ryxos-xen-sample.service" twoManual.systemd.services.ryxos-xen-second.requires))
-    # Starting/stopping sample and third remains ordered even with no job for second.
-    (builtins.elem "ryxos-xen-sample.service" threeManual.systemd.services.ryxos-xen-third.after)
-    (builtins.elem "ryxos-xen-second.service" threeManual.systemd.services.ryxos-xen-third.after)
     (valid.systemd.services.ryxos-xen-sample.serviceConfig.KillMode == "process")
     (!valid.systemd.services.ryxos-xen-sample.restartIfChanged)
     (!valid.systemd.services.ryxos-xen-sample.stopIfChanged)
     (!valid.systemd.services.ryxos-xen-sample.reloadIfChanged)
     (!automatic.systemd.services.ryxos-xen-sample.restartIfChanged)
     (!automatic.systemd.services.ryxos-xen-sample.stopIfChanged)
-    (lib.hasSuffix " stop" valid.systemd.services.ryxos-xen-sample.serviceConfig.ExecStop)
-    (!valid.ryxos.xenDomains.domains.sample.destroyOnTimeout)
+    (lib.hasSuffix " start sample" valid.systemd.services.ryxos-xen-sample.serviceConfig.ExecStart)
+    (lib.hasSuffix " stop sample" valid.systemd.services.ryxos-xen-sample.serviceConfig.ExecStop)
+    (lib.hasPrefix (parsed valid).lifecycleRunner valid.systemd.services.ryxos-xen-sample.serviceConfig.ExecStop)
+    (lib.hasInfix (parsed valid).recoveryInventory valid.systemd.services.ryxos-xen-sample.serviceConfig.ExecStop)
+    (lib.all (path: builtins.hasAttr path (builtins.getContext (specification valid).text)) (
+      builtins.attrNames (
+        builtins.getContext valid.systemd.services.ryxos-xen-sample.serviceConfig.ExecStop
+      )
+    ))
+    (!lib.hasInfix "--spec" valid.systemd.services.ryxos-xen-sample.serviceConfig.ExecStart)
+    (valid.systemd.services.ryxos-xen-sample.serviceConfig.TimeoutStopSec >= 600 + 90)
+    ((parsed valid).schema == 2)
+    ((parsed valid).disposableImage == null)
+    (declaredInventory.schema == 1)
+    (declaredInventory.domains.sample == "${specification valid}")
+    ((parsed managed).disposableImage == "${managed.ryxos.xenDomains.domains.sample.disposableImage}")
+    ((parsed managed).retainPaths == [ "${pkgs.hello}" ])
+    (lib.hasPrefix "${builtins.storeDir}/" (parsed managed).configFile)
+    (builtins.hasAttr (builtins.unsafeDiscardStringContext pkgs.hello.drvPath) (
+      builtins.getContext (specification managed).text
+    ))
+    (builtins.hasAttr (builtins.unsafeDiscardStringContext configFileStore) (
+      builtins.getContext (specification managed).text
+    ))
+    (builtins.elem valid.system.build.ryxosXenDomainHelper valid.environment.systemPackages)
   ];
+  configFileStore = "${./test_xen_domain.py}";
 in
 assert lib.assertMsg (builtins.all (value: value) contract) "Xen lifecycle module contract failed";
 pkgs.runCommand "xen-domain-lifecycle-tests"

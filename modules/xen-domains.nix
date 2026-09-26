@@ -7,34 +7,56 @@
 let
   cfg = config.ryxos.xenDomains;
   inherit (lib) mkEnableOption mkOption types;
-  domainNames = builtins.attrNames cfg.domains;
-  predecessors = builtins.listToAttrs (
-    lib.imap0 (index: name: {
-      inherit name;
-      value = lib.take index domainNames;
-    }) domainNames
-  );
   uuidType = types.strMatching "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+  runner = pkgs.writeShellApplication {
+    name = "ryxos-xen-domain-runner";
+    text = ''
+      exec ${pkgs.python3}/bin/python3 -I ${./xen-domain.py} "$@"
+    '';
+  };
+  recoveryInventory = pkgs.writeText "xen-domain-recovery-inventory.json" (
+    builtins.toJSON {
+      schema = 1;
+      domains = { };
+    }
+  );
+  inventory = pkgs.writeText "xen-domain-inventory.json" (
+    builtins.toJSON {
+      schema = 1;
+      domains = lib.mapAttrs (_: specification: "${specification}") specifications;
+    }
+  );
   helper = pkgs.writeShellApplication {
     name = "ryxos-xen-domain";
     text = ''
-      exec ${pkgs.python3}/bin/python3 ${./xen-domain.py} "$@"
+      exec ${runner}/bin/ryxos-xen-domain-runner ${inventory} "$@"
     '';
   };
   specifications = lib.mapAttrs (
     name: domain:
     pkgs.writeText "xen-domain-${name}.json" (
       builtins.toJSON {
+        schema = 2;
         inherit name;
         inherit (domain)
           uuid
           startTimeoutSec
           shutdownTimeoutSec
-          destroyOnTimeout
           ;
-        configFile = toString domain.configFile;
+        # Interpolation imports path-valued files and preserves store references.
+        configFile = "${domain.configFile}";
         xl = "${config.virtualisation.xen.package}/bin/xl";
-        stateDirectory = "/var/lib/ryxos-xen-domains";
+        nixStore = "${config.nix.package}/bin/nix-store";
+        qemuImg = "${config.virtualisation.xen.qemu.package}/bin/qemu-img";
+        lifecycleRunner = "${runner}/bin/ryxos-xen-domain-runner";
+        recoveryInventory = "${recoveryInventory}";
+        toolDirectories = [
+          "${config.virtualisation.xen.package}/bin"
+          "${config.virtualisation.xen.qemu.package}/bin"
+          "${pkgs.coreutils}/bin"
+        ];
+        retainPaths = map (path: "${path}") domain.retainPaths;
+        disposableImage = if domain.disposableImage == null then null else "${domain.disposableImage}";
       }
     )
   ) cfg.domains;
@@ -47,8 +69,9 @@ in
       description = ''
         Domain configurations managed through xl. Each file must declare its
         matching name and UUID, and use destroy for poweroff, reboot and crash.
-        Images, disks, networks and boot artifacts are supplied by the caller.
-        This module does not create or erase storage.
+        Images, networks and boot artifacts are supplied by the caller. Optional
+        disposable storage uses one managed qcow2 overlay over an immutable raw
+        image; otherwise the caller's external storage remains unmanaged.
       '';
       type = types.attrsOf (
         types.submodule {
@@ -80,13 +103,26 @@ in
               default = 60;
               description = "Maximum wait for graceful shutdown and domain removal.";
             };
-            destroyOnTimeout = mkOption {
-              type = types.bool;
-              default = false;
+            retainPaths = mkOption {
+              type = types.listOf (types.either types.path types.package);
+              default = [ ];
               description = ''
-                Permit xl destroy only after graceful shutdown times out and
-                the live name, UUID and domain ID still match the ownership
-                receipt. Otherwise leave the guest running and fail the stop.
+                Additional immutable boot and backing artifacts retained by the
+                active specification's GC lease. Use this for literal store
+                paths inside configuration text that lacks Nix string context.
+                The lease remains until an explicit absent-only reset.
+              '';
+            };
+            disposableImage = mkOption {
+              type = types.nullOr (types.either types.path types.package);
+              default = null;
+              description = ''
+                Immutable raw image file for a private disposable qcow2 overlay.
+                This replaces the reviewed xl configuration's entire disk list
+                with one writable qdisk-backed xvda. Start/stop preserve it;
+                explicit reset removes it only after Xen confirms absence twice.
+                External or remote backing paths and existing qcow2 chains are
+                not accepted. Null leaves all configured disks unmanaged.
               '';
             };
           };
@@ -127,13 +163,17 @@ in
       }
     ];
     environment.systemPackages = [ helper ];
-    environment.etc = lib.mapAttrs' (
+    system.build.ryxosXenDomainHelper = helper;
+    environment.etc = {
+      "ryxos/xen-domains.json".source = inventory;
+    }
+    // lib.mapAttrs' (
       name: specification: lib.nameValuePair "ryxos/xen-domains/${name}.json" { source = specification; }
     ) specifications;
     systemd.services = lib.mapAttrs' (
       name: domain:
       let
-        command = "${helper}/bin/ryxos-xen-domain --spec ${specifications.${name}}";
+        command = "${helper}/bin/ryxos-xen-domain";
       in
       lib.nameValuePair "ryxos-xen-${name}" {
         description = "Manage the ${name} Xen domain";
@@ -148,10 +188,7 @@ in
         after = [
           "xen-init-dom0.service"
           "xenstored.service"
-        ]
-        # Order shared start/stop transactions without starting a peer or
-        # requiring its success. This also covers manually started domains.
-        ++ map (earlier: "ryxos-xen-${earlier}.service") predecessors.${name};
+        ];
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
@@ -161,10 +198,14 @@ in
           StateDirectory = "ryxos-xen-domains";
           StateDirectoryMode = "0700";
           UMask = "0077";
-          ExecStart = "${command} start";
-          ExecStop = "${command} stop";
-          TimeoutStartSec = domain.startTimeoutSec + 90;
-          TimeoutStopSec = domain.shutdownTimeoutSec + 90;
+          ExecStart = "${command} start ${name}";
+          # The retained spec roots this inventory-independent stop command,
+          # including Python, even when its system generation is collected.
+          ExecStop = "${runner}/bin/ryxos-xen-domain-runner ${recoveryInventory} stop ${name}";
+          TimeoutStartSec = domain.startTimeoutSec + 180;
+          # Stop uses the retained specification, whose bound can differ from
+          # the current declaration after a generation switch.
+          TimeoutStopSec = 690;
         };
       }
     ) cfg.domains;
