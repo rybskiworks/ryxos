@@ -22,10 +22,84 @@ import uuid
 GIB = 1024 ** 3
 MIB = 1024 ** 2
 PREFLIGHT = runpy.run_path(str(Path(__file__).with_name("lab-preflight.py")))
+NETWORK_PROFILES = ("closed", "loopback-ssh")
+SSH_NETDEV = "user,id=ssh0,restrict=on,ipv6=off,hostfwd=tcp:127.0.0.1:22222-10.0.2.15:22222"
+SSH_DEVICE = "virtio-net-pci,netdev=ssh0,mac=52:54:00:72:78:01"
 
 
 class Refusal(RuntimeError):
     pass
+
+
+def network_policy(profile):
+    if profile not in NETWORK_PROFILES:
+        raise Refusal("unknown network admission profile")
+    return {"profile": profile, "host_forwards": [] if profile == "closed" else [{
+        "protocol": "tcp", "host_address": "127.0.0.1", "host_port": 22222,
+        "guest_address": "10.0.2.15", "guest_port": 22222,
+        "netdev": SSH_NETDEV, "device": SSH_DEVICE,
+    }]}
+
+
+def request_network_policy(request):
+    if "network_policy" not in request:
+        # Old closed-network leases remain recoverable with their existing checks.
+        recorded = network_policy("closed")
+    else:
+        recorded = request["network_policy"]
+    if not isinstance(recorded, dict):
+        raise Refusal("malformed recorded network policy")
+    expected = network_policy(recorded.get("profile"))
+    if json.dumps(recorded, sort_keys=True) != json.dumps(expected, sort_keys=True):
+        raise Refusal("recorded network mapping does not match its fixed profile")
+    admission = request.get("driver_admission")
+    if admission is not None or expected["profile"] == "loopback-ssh":
+        if not isinstance(admission, dict) or admission.get("network_policy") != expected:
+            raise Refusal("recorded network profile lacks its matching driver admission")
+    return expected
+
+
+def inspect_loopback_arguments(arguments, source):
+    """Admit only the reviewed single-dom0 launcher shape, not general QEMU flags."""
+    tokens = [item for item in arguments if item != "\n"]
+    if (tokens[-2:] != ["$QEMU_OPTS", "$@"] or source.count("QEMU_OPTS") != 1
+            or "QEMU_NET_OPTS" in source or source.count("$@") != 1):
+        raise Refusal("unexpected launcher argument or network environment expansion")
+    values, flags = {}, []
+    allowed = {"-machine", "-cpu", "-name", "-m", "-smp", "-device", "-nic", "-netdev", "-drive", "-object"}
+    index, end = 2, len(tokens) - 2
+    while index < end:
+        key = tokens[index]
+        if key in ("-no-user-config", "-usb", "-nographic"):
+            flags.append(key)
+            index += 1
+        elif key in allowed and index + 1 < end:
+            values.setdefault(key, []).append(tokens[index + 1])
+            index += 2
+        else:
+            raise Refusal("unreviewed extra argument in the fixed loopback launcher")
+    memory, cpus = values.get("-m", []), values.get("-smp", [])
+    if (len(memory) != 1 or not memory[0].isdigit() or int(memory[0]) <= 0
+            or len(cpus) != 1 or not cpus[0].isdigit() or int(cpus[0]) <= 0):
+        raise Refusal("invalid loopback launcher resource arguments")
+    expected = {
+        "-machine": ["accel=kvm", "q35", "memory-backend=mem0"],
+        "-cpu": ["max", "host"], "-name": ["dom0"], "-m": memory, "-smp": cpus,
+        "-nic": ["none"], "-netdev": [SSH_NETDEV],
+        "-device": ["virtio-rng-pci", SSH_DEVICE,
+                    "virtio-blk-pci,bootindex=1,drive=drive1,serial=root",
+                    "virtio-keyboard", "usb-tablet,bus=usb-bus.0"],
+        "-object": ["memory-backend-memfd,id=mem0,size=" + memory[0] + "M,share=on"],
+    }
+    drives = values.pop("-drive", [])
+    firmware = (r"if=pflash,format=raw,unit=0,readonly=on,file="
+                r"/nix/store/[0-9a-z]{32}-OVMF-[^/\s,]+/FV/OVMF_CODE\.fd")
+    if (values != expected or flags != ["-no-user-config", "-usb", "-nographic"]
+            or len(drives) != 3
+            or drives[0] != "cache=writeback,file=$NIX_DISK_IMAGE,id=drive1,if=none,index=1,werror=report"
+            or not re.fullmatch(firmware, drives[1])
+            or drives[2] != "if=pflash,format=raw,unit=1,readonly=off,file=$NIX_EFI_VARS"):
+        raise Refusal("launcher differs from the fixed loopback NIC, forward or device contract")
 
 
 def private_directory(path, uid=None):
@@ -98,8 +172,9 @@ def store_file(value, store=Path("/nix/store"), executable_required=False):
     return path
 
 
-def inspect_driver(value, memory_mib, vcpus, store=Path("/nix/store")):
+def inspect_driver(value, memory_mib, vcpus, store=Path("/nix/store"), network_profile="closed"):
     """Recognize the pinned NixOS driver contract; this is not a shell sandbox."""
+    policy = network_policy(network_profile)
     driver = store_file(value, store, True)
     text = driver.read_text()
     configs = re.findall(r"--config (" + re.escape(str(store)) + r"/[^\s\"']+)", text)
@@ -112,6 +187,8 @@ def inspect_driver(value, memory_mib, vcpus, store=Path("/nix/store")):
     machines = config.get("vms", {})
     if not machines or len(machines) > 16:
         raise Refusal("expected a bounded nonempty QEMU machine set")
+    if network_profile == "loopback-ssh" and list(machines) != ["dom0"]:
+        raise Refusal("the fixed loopback profile requires exactly one dom0 machine")
     records = []
     for machine in machines.values():
         launcher = store_file(machine["start_script"], store, True)
@@ -124,10 +201,12 @@ def inspect_driver(value, memory_mib, vcpus, store=Path("/nix/store")):
         if "-no-user-config" not in source:
             raise Refusal("the QEMU launcher must disable implicit user configuration")
         arguments = shlex.split(source[source.index(lines[0]):], comments=True)
+        if network_profile == "loopback-ssh":
+            inspect_loopback_arguments(arguments, source)
         nic_values = []
         for index, argument in enumerate(arguments):
             key = argument.split("=", 1)[0]
-            if key in ("-netdev", "-net", "-virtfs", "-fsdev"):
+            if key in ("-net", "-virtfs", "-fsdev") or (key == "-netdev" and network_profile == "closed"):
                 raise Refusal("explicit network backends and host directory shares are forbidden")
             if key in ("-nic", "-device") and "=" not in argument and index + 1 >= len(arguments):
                 raise Refusal("the QEMU launcher has an incomplete device argument")
@@ -135,7 +214,8 @@ def inspect_driver(value, memory_mib, vcpus, store=Path("/nix/store")):
                 nic_values.append(argument.split("=", 1)[1] if "=" in argument else arguments[index + 1])
             if key == "-device":
                 device = argument.split("=", 1)[1] if "=" in argument else arguments[index + 1]
-                if device.split(",", 1)[0].startswith(("virtio-net", "virtio-9p", "vhost-user-fs", "vfio-pci", "usb-host")):
+                if (device.split(",", 1)[0].startswith(("virtio-net", "virtio-9p", "vhost-user-fs", "vfio-pci", "usb-host"))
+                        and not (network_profile == "loopback-ssh" and device == SSH_DEVICE)):
                     raise Refusal("network, shared-filesystem and host-passthrough devices are forbidden")
         if nic_values != ["none"]:
             raise Refusal("the QEMU launcher must explicitly disable all default NICs")
@@ -150,7 +230,7 @@ def inspect_driver(value, memory_mib, vcpus, store=Path("/nix/store")):
     if sum(row["vcpus"] for row in records) > vcpus:
         raise Refusal("declared vCPUs are below the driver machine total")
     return {"driver": str(driver), "store_path": str(store / driver.relative_to(store).parts[0]),
-            "config": str(config_path), "machines": records}
+            "config": str(config_path), "machines": records, "network_policy": policy}
 
 
 def retain_driver(output, admitted, nix_store, env, run=subprocess.run):
@@ -406,7 +486,13 @@ def inside(request_path, verify=effective_limits, run=subprocess.run):
         raise Refusal("scratch ownership changed before launch")
     receipt = {"schema_version": 1, "driver_started": False, "status": "blocked"}
     try:
+        receipt["network_policy"] = request_network_policy(request)
         receipt["effective_limits"] = verify(request)
+        if receipt["network_policy"]["profile"] == "loopback-ssh":
+            admitted = inspect_driver(request["driver"], request["limits"]["memory_mib"],
+                                      request["limits"]["vcpus"], network_profile="loopback-ssh")
+            if admitted != request["driver_admission"]:
+                raise Refusal("loopback driver admission changed before launch")
         env = clean_environment(scratch, output, request["path"])
         receipt.update(status="running", driver_started=True)
         write_json(output / "inside.json", receipt)
@@ -474,7 +560,9 @@ def execute(args, tools):
             request = read_json(output / "request.json")
             if request["uid"] != uid or request["run_dir"] != str(output):
                 raise Refusal("recovery request belongs to a different owner or path")
+            policy = request_network_policy(request)
             result = cleanup(request, slot, controller)
+            result["network_policy"] = policy
             write_json(output / "recovery.json", result)
             return {"status": "recovered", "output": str(output), "cleanup": result}, 0
         if slot.active.exists() or slot.active.is_symlink():
@@ -502,8 +590,12 @@ def execute(args, tools):
             write_json(scratch / "ownership.json", {"nonce": nonce}, exclusive=True)
             for name in ("home", "tmp", "runtime", "config", "cache", "state"):
                 (scratch / name).mkdir(mode=0o700)
-            receipt["driver_admission"] = inspect_driver(args.driver, args.memory_mib, args.vcpus)
+            receipt["driver_admission"] = inspect_driver(args.driver, args.memory_mib, args.vcpus,
+                                                         network_profile=args.network_profile or "closed")
             request["driver"] = receipt["driver_admission"]["driver"]
+            request["driver_admission"] = receipt["driver_admission"]
+            request["network_policy"] = receipt["driver_admission"]["network_policy"]
+            receipt["network_policy"] = request["network_policy"]
             receipt["gc_root"] = retain_driver(output, receipt["driver_admission"], tools["nix_store"],
                                                 clean_environment(scratch, output, tools["path"]))
             request["gc_root"] = receipt["gc_root"]
@@ -555,6 +647,8 @@ def main(argv=None):
     parser.add_argument("--inside", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--recover", type=Path, help="stop and clean only a recorded, unresolved owned run")
     parser.add_argument("--driver", help="realized immutable NixOS test driver executable")
+    parser.add_argument("--network-profile", choices=NETWORK_PROFILES,
+                        help="fixed launcher policy (default: closed); recovery uses the recorded policy")
     parser.add_argument("--output-dir", type=Path, help="existing evidence parent; a new private run directory is created")
     for name, default in (("memory-mib", 4096), ("qemu-overhead-mib", 2048), ("vcpus", 2), ("reserve-cores", 2),
                           ("disk-reserve-gib", 21), ("memory-reserve-gib", 4), ("timeout-seconds", 900), ("log-limit-mib", 64)):
@@ -563,6 +657,8 @@ def main(argv=None):
                           ("env", "env"), ("nix-store", "nix-store")):
         parser.add_argument("--" + name, default=default, help="executable path (packaging/testing integration)")
     args = parser.parse_args(argv)
+    if (args.recover or args.inside) and args.network_profile is not None:
+        parser.error("inside execution and recovery use the recorded network policy; overrides are forbidden")
     if args.inside:
         return inside(args.inside)
     if not args.recover and (not args.driver or not args.output_dir):

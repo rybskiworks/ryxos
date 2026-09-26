@@ -25,10 +25,33 @@ Declare the sum of the outer driver VMs' memory and vCPUs. The runner reads the
 pinned launcher scripts, refuses insufficient budgets, requires KVM without a
 software fallback and requires `-no-user-config`. Its current driver contract
 also refuses containers, test VLANs and SSH backdoors. It checks the actual QEMU
-arguments for exactly `-nic none` and refuses explicit network backends, directory
+arguments for exactly `-nic none` under its default `closed` profile and refuses explicit network backends, directory
 shares and network/filesystem/host-passthrough devices. These checks recognize
 the selected NixOS launcher format; they do not interpret arbitrary shell
 programs. Driver source and its guest policies still require review.
+
+An explicit `--network-profile loopback-ssh` admits only one reviewed `dom0`
+launcher with a fixed restricted SLIRP backend. Its sole mapping is TCP
+`127.0.0.1:22222` on the host to `10.0.2.15:22222` in dom0, with IPv6 disabled
+and MAC `52:54:00:72:78:01`. No port, address, path, device or extra-argument
+options accompany this profile. A busy port must be refused by the fixture;
+the runner never stops its existing owner to make the forward available.
+
+This profile recognizes the pinned q35 HVM launcher's complete device/drive
+argument shape. It refuses another NIC/backend/forward, wildcard binding,
+unrestricted networking, network environment expansion, QEMU configuration
+overrides, host shares, arbitrary firmware/disk paths and extra arguments.
+The existing private disk/EFI variables and cleared environment remain in use.
+The native test must independently verify the listener's exact QEMU ownership,
+authentication, command restrictions, egress denial and listener cleanup.
+Argument admission does not itself prove those runtime properties.
+
+The selected policy and fixed mapping are written into the private request and
+receipts. The inner verifier re-inspects a loopback driver's immutable admission
+before starting it. Public synthetic fixture keys and a loopback bind are for a
+disposable cooperative lab; they do not protect it from other local users with
+the same public test key. This remains a finite driver interface, without an
+interactive session or a general network exception.
 
 Admission checks usable KVM, the already enabled host nested parameter, complete
 online SMT groups and free disk/RAM. It reserves two physical cores by default,
@@ -78,6 +101,11 @@ ryxos-lab-run --recover "$PWD/lab-evidence/ryxos-lab-<run>"
 Recovery requires the matching private request and active lease. It cannot adopt
 another service or clear an unrelated lease. It applies the same exact-unit and
 scratch-identity checks as normal cleanup.
+
+Recovery uses the policy recorded in the request, accepts no network-profile
+override, and validates its fixed mapping before cleanup. Existing leases from
+the original closed-network runner remain recoverable. Recovery does not start
+the driver or require its files to be reopened merely to stop an owned service.
 
 Submission intent is recorded before the launcher process starts. If cancellation
 occurs before the unit becomes visible, an initial `not-found` response is not
