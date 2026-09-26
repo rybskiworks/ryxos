@@ -10,3 +10,10 @@ Persistent HVM declarations must explicitly select and retain a compatible
 machine ABI. This test does not establish that existing guests, saved state, or
 disks created with a different machine can migrate automatically. A package or
 machine change requires separate compatibility qualification.
+
+The runner also passes the guest's generated `boot.kernelParams` through the
+`extra` override, alongside its installed system-profile init path and probe
+mode. Domain declarations must derive this command line from the guest
+configuration. In particular, the systemd initrd uses `root=fstab`; substituting
+a root device creates a competing mount unit instead of using NixOS's root
+filesystem declaration.

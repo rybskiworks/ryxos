@@ -146,6 +146,18 @@ pkgs.testers.runNixOSTest {
               "image_absent_from_dom0_store": True,
           }
           create_command = "xl create /etc/xen/${if nested then "kvm" else "boot"}-probe-${guestType}.cfg"
+          # The initrd owns root-mount policy through its generated parameters.
+          # A handwritten root device duplicates systemd's fstab mount unit.
+          guest_kernel_params = ${
+            builtins.toJSON (
+              [ "init=/nix/var/nix/profiles/system/init" ]
+              ++ guest.config.boot.kernelParams
+              ++ [ "ryxos.probe=${if nested then "nested" else "boot"}" ]
+            )
+          }
+          guest_cmdline = " ".join(guest_kernel_params)
+          create_command += " " + shlex.quote("extra=" + json.dumps(guest_cmdline))
+          receipt["guest_kernel_cmdline"] = guest_cmdline
           if ${if guestType == "hvm" then "True" else "False"}:
               # Xen 4.20 uses an alias removed by QEMU 11. These new disposable
               # guests select a versioned ABI; this is not a migration policy.
