@@ -24,6 +24,11 @@
       };
       mkSystem = import ./lib/mk-system.nix { inherit baseModule; };
       xenLab = import ./tests/xen { inherit nixpkgs pkgs baseModule; };
+      xenLifecycle = import ./tests/xen/lifecycle.nix {
+        inherit nixpkgs pkgs baseModule;
+        xenDomainsModule = self.nixosModules.xenDomains;
+        xenControlModule = self.nixosModules.xenControl;
+      };
       labRunner = pkgs.writeShellApplication {
         name = "ryxos-lab-run";
         runtimeInputs = [
@@ -93,6 +98,19 @@
               --output-dir "$1" --memory-mib 6144 --qemu-overhead-mib 2048 --vcpus 4
           '';
         };
+        xen-lifecycle-smoke = pkgs.writeShellApplication {
+          name = "xen-lifecycle-smoke";
+          text = ''
+            if [[ $# != 1 ]]; then
+              echo "usage: xen-lifecycle-smoke EVIDENCE_DIRECTORY" >&2
+              exit 2
+            fi
+            exec ${labRunner}/bin/ryxos-lab-run \
+              --driver ${xenLifecycle.test.driver}/bin/nixos-test-driver \
+              --output-dir "$1" --memory-mib 6144 --qemu-overhead-mib 2048 --vcpus 4 \
+              --timeout-seconds 1500
+          '';
+        };
         xen-lab-preflight = pkgs.writeShellApplication {
           name = "xen-lab-preflight";
           runtimeInputs = [
@@ -108,6 +126,7 @@
         leaf-preview = self.nixosConfigurations.leaf-preview.config.system.build.vm;
         xen-dom0-test-driver = xenLab.tests.dom0.driver;
         xen-hvm-test-driver = xenLab.tests.hvm.driver;
+        xen-lifecycle-test-driver = xenLifecycle.test.driver;
         xen-experimental-hvm-nested-test-driver = xenLab.tests.experimentalHvmNested.driver;
         xen-experimental-pvh-nested-test-driver = xenLab.tests.experimentalPvhNested.driver;
         xen-experimental-hvm-nested-test = xenLab.tests.experimentalHvmNested;
@@ -127,6 +146,10 @@
           type = "app";
           program = "${self.packages.${system}.xen-hvm-smoke}/bin/xen-hvm-smoke";
         };
+        xen-lifecycle-smoke = {
+          type = "app";
+          program = "${self.packages.${system}.xen-lifecycle-smoke}/bin/xen-lifecycle-smoke";
+        };
       };
       checks.${system} = {
         lab-preflight =
@@ -138,13 +161,14 @@
             '';
         xen-probes = pkgs.runCommand "ryxos-xen-probe-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
           export PYTHONDONTWRITEBYTECODE=1
-          python3 -m unittest discover -s ${./tests/xen} -p 'test_probe.py'
+          python3 -m unittest discover -s ${./tests/xen} -p 'test_*.py'
           touch "$out"
         '';
         xen-domains = import ./tests/xen-domains.nix { inherit pkgs; };
         xen-control = import ./tests/xen-control.nix { inherit pkgs; };
         xen-dom0 = xenLab.tests.dom0;
         xen-hvm = xenLab.tests.hvm;
+        xen-lifecycle = xenLifecycle.test;
         leaf = import ./tests/leaf.nix {
           inherit pkgs baseModule;
           leafModule = self.nixosModules.nonvirtualizingGuest;

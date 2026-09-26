@@ -34,6 +34,27 @@ from downstream KVM workload acceptance and the optional combined experiment.
 
 The [Xen domain module](docs/xen-domains.md) provides explicit domain ownership and bounded systemd lifecycle without imposing image or network topology.
 
+The optional [SSH control module](docs/xen-control.md) restricts a dedicated
+operator account to declared lifecycle actions. Key enrollment, listeners and
+network policy remain explicit caller choices.
+
+For the fixed ordinary-HVM smoke test, create a private evidence directory and
+use the [supervised runner](docs/lab-supervisor.md):
+
+```sh
+mkdir -m 700 lab-evidence
+nix run .#xen-hvm-smoke -- "$PWD/lab-evidence"
+```
+
+It requires usable KVM, a systemd user manager and effective CPU/memory controls.
+It retains receipts and the driver closure, and cleans up its disposable VM
+state. This is an automated test, not an interactive Xen management session.
+
+`nix run .#xen-lifecycle-smoke -- "$PWD/lab-evidence"` uses the same resource
+supervisor for the managed disk, generation-change, reset and restricted SSH
+fixture. Its SSH exchange stays inside dom0 over loopback with public test keys;
+it does not expose a host listener or enroll a real operator key.
+
 ## Validation
 
 `just evaluate` checks all configurations without building. `just check` builds the declared checks, including real Xen boot with an ordinary HVM guest. Nested HVM/PVH probes are separate experimental package outputs. Xen checks require a builder with usable KVM and appropriate host CPU capabilities; they refuse a software-emulation fallback.
