@@ -8,9 +8,34 @@ from pathlib import Path
 import platform
 import shutil
 import stat
+import struct
 import subprocess
 
 GIB = 1024 ** 3
+
+
+def xen_amd_nested_prerequisites(fd):
+    """Inspect the outer KVM interface; physical CPU flags alone are insufficient."""
+    count = 256
+    data = bytearray(8 + count * 40)
+    struct.pack_into("=II", data, 0, count, 0)
+    # KVM_GET_SUPPORTED_CPUID returns kvm_cpuid2 and its trailing entries.
+    fcntl.ioctl(fd, 0xC008AE05, data, True)
+    returned = struct.unpack_from("=I", data)[0]
+    if returned > count:
+        raise ValueError("KVM CPUID response exceeds the allocated entry count")
+    entries = [struct.unpack_from("=10I", data, 8 + i * 40)
+               for i in range(returned)]
+    matches = [entry for entry in entries
+               if entry[0] == 0x8000000A and entry[1] == 0]
+    if len(matches) != 1:
+        raise ValueError("KVM must provide exactly one SVM capability entry")
+    features = {name: bool(matches[0][6] & (1 << bit))
+                for bit, name in [(0, "npt"), (1, "lbrv"), (3, "nrips"),
+                                  (6, "flushbyasid"), (7, "decodeassists")]}
+    return {"source": "KVM_GET_SUPPORTED_CPUID", "required_features": features,
+            "missing": [name for name, present in features.items() if not present],
+            "available": all(features.values()), "nested_workload_qualified": False}
 
 
 def cpu_allocation(rows, allowed, vcpus, reserve_cores):
@@ -54,8 +79,11 @@ def main():
     parser.add_argument("--disk-reserve-gib", type=int, default=21)
     parser.add_argument("--memory-reserve-gib", type=int, default=4)
     parser.add_argument("--nix", help="Nix client executable when it is not on PATH")
+    parser.add_argument("--require-xen-nesting", action="store_true",
+                        help="also require AMD Xen nested-HVM CPUID prerequisites")
     args = parser.parse_args()
-    budgets = {key: value for key, value in vars(args).items() if key != "nix"}
+    budgets = {key: value for key, value in vars(args).items()
+               if key not in {"nix", "require_xen_nesting"}}
     if any(value <= 0 for value in budgets.values()):
         parser.error("all resource limits must be positive")
     result = {"schema_version": 1, "status": "blocked", "errors": [],
@@ -105,6 +133,18 @@ def main():
                 result["kvm_api"] = fcntl.ioctl(fd, 0xAE00, 0)
                 if result["kvm_api"] != 12:
                     errors.append("unexpected KVM API version")
+                if vendor == "amd":
+                    try:
+                        result["xen_nested_prerequisites"] = xen_amd_nested_prerequisites(fd)
+                    except (OSError, ValueError) as error:
+                        result["xen_nested_prerequisites"] = {
+                            "available": False, "error": str(error),
+                            "nested_workload_qualified": False}
+                if args.require_xen_nesting:
+                    prerequisites = result.get("xen_nested_prerequisites", {})
+                    if not prerequisites.get("available"):
+                        errors.append("Xen nested-HVM prerequisites are unavailable or unverified: "
+                                      + ", ".join(prerequisites.get("missing", ["unsupported probe"])))
             finally:
                 os.close(fd)
         nix = shutil.which(args.nix or "nix")

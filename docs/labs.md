@@ -25,6 +25,14 @@ is not on PATH. Its proposed CPU allocation is not applied. The report explicitl
 distinguishes available host controllers from verified cgroup delegation and
 enforced limits. It neither loads modules nor changes services or hardware.
 
+On AMD the report also checks the outer KVM interface's SVM CPUID prerequisites
+for Xen nesting. Physical CPU flags and an enabled KVM `nested` parameter do not
+prove these are exposed to Xen. Use `-- --require-xen-nesting` to make missing
+prerequisites a refusal for the optional combined experiment; ordinary HVM boot
+does not require them. Xen 4.20 requires NPT, LBR virtualization, NRIP save,
+flush-by-ASID and decode assists. Passing this check still does not prove that
+a nested workload boots. Do not force unsupported CPUID bits to pass admission.
+
 The ordinary checks include Xen dom0 boot and an HVM boot probe with nesting
 disabled. Explicit experimental HVM/PVH drivers retain the nested KVM probe.
 An empty KVM object is only API evidence; it is not evidence of a booted workload.

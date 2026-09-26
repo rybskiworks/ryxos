@@ -19,10 +19,16 @@ let
   disk = "/dev/disk/by-id/virtio-ryxos-probe";
   kernel = "${guest.config.system.build.kernel}/${guest.config.system.boot.loader.kernelFile}";
   initrd = "${guest.config.system.build.initialRamdisk}/${guest.config.system.boot.loader.initrdFile}";
+  guestKernelParams =
+    nested:
+    [ "init=/nix/var/nix/profiles/system/init" ]
+    ++ guest.config.boot.kernelParams
+    ++ [ "ryxos.probe=${if nested then "nested" else "boot"}" ];
   mkGuestConfig =
     guestType: nested:
     pkgs.writeText "xen-${if nested then "kvm" else "boot"}-probe-${guestType}.cfg" ''
       name = "${domainName}"
+      uuid = "d2f61444-6530-4d88-bd40-56b99561a4da"
       type = "${guestType}"
       memory = 2048
       maxmem = 2048
@@ -34,9 +40,11 @@ let
       ramdisk = "${initrd}"
       # The guest disk owns its installed profile. Referring to its toplevel here
       # would also embed that complete closure in dom0's disk image.
-      extra = "init=/nix/var/nix/profiles/system/init root=/dev/xvda console=hvc0 ryxos.probe=${
-        if nested then "nested" else "boot"
-      }"
+      extra = ${builtins.toJSON (lib.concatStringsSep " " (guestKernelParams nested))}
+      ${lib.optionalString (guestType == "hvm") ''
+        # New disposable HVM guests use the machine ABI provided by QEMU 11.
+        device_model_args_hvm = [ "-machine", "xenfv-4.2,suppress-vmdesc=on" ]
+      ''}
       disk = [ "format=raw,vdev=xvda,access=rw,backendtype=phy,target=${disk}" ]
       vif = [ ]
       on_poweroff = "destroy"
@@ -148,21 +156,9 @@ pkgs.testers.runNixOSTest {
           create_command = "xl create /etc/xen/${if nested then "kvm" else "boot"}-probe-${guestType}.cfg"
           # The initrd owns root-mount policy through its generated parameters.
           # A handwritten root device duplicates systemd's fstab mount unit.
-          guest_kernel_params = ${
-            builtins.toJSON (
-              [ "init=/nix/var/nix/profiles/system/init" ]
-              ++ guest.config.boot.kernelParams
-              ++ [ "ryxos.probe=${if nested then "nested" else "boot"}" ]
-            )
-          }
-          guest_cmdline = " ".join(guest_kernel_params)
-          create_command += " " + shlex.quote("extra=" + json.dumps(guest_cmdline))
-          receipt["guest_kernel_cmdline"] = guest_cmdline
+          receipt["guest_kernel_cmdline"] = ${builtins.toJSON (lib.concatStringsSep " " (guestKernelParams nested))}
+          receipt["guest_uuid"] = "d2f61444-6530-4d88-bd40-56b99561a4da"
           if ${if guestType == "hvm" then "True" else "False"}:
-              # Xen 4.20 uses an alias removed by QEMU 11. These new disposable
-              # guests select a versioned ABI; this is not a migration policy.
-              machine_override = 'device_model_args_hvm=["-machine","xenfv-4.2,suppress-vmdesc=on"]'
-              create_command += " " + shlex.quote(machine_override)
               receipt["device_model_machine"] = "xenfv-4.2"
           dom0.succeed(create_command, timeout=90)
           # The result is read from an unmounted disk only after xl reports
