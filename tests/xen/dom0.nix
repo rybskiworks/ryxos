@@ -5,6 +5,9 @@
     cores = 4;
     useBootLoader = true;
     useEFIBoot = true;
+    sharedDirectories = lib.mkForce { };
+    useHostCerts = false;
+    mountHostNixStore = false;
     graphics = false;
     vlans = [ ];
     qemu = {

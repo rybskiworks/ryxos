@@ -37,7 +37,9 @@ in
     (lib.mkIf cfg.enable {
       boot.kernelModules = [ (if cfg.cpuVendor == "amd" then "kvm-amd" else "kvm-intel") ];
       boot.extraModprobeConfig = ''
-        options ${if cfg.cpuVendor == "amd" then "kvm_amd" else "kvm_intel"} nested=${if cfg.nested then "1" else "0"}
+        options ${if cfg.cpuVendor == "amd" then "kvm_amd" else "kvm_intel"} nested=${
+          if cfg.nested then "1" else "0"
+        }
       '';
       services.udev.extraRules = ''
         KERNEL=="kvm", GROUP="kvm", MODE="0660"

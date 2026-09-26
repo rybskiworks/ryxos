@@ -1,4 +1,4 @@
-"""KVM API probe for a disposable, credential-free Xen guest."""
+"""Boot and optional KVM probes for a disposable, credential-free Xen guest."""
 
 import fcntl
 import json
@@ -6,11 +6,47 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import uuid
 
 
-def probe() -> dict:
-    result = {"schema": 1, "status": "failed", "vm_booted": False}
+def probe_mode(cmdline: str) -> str:
+    modes = [word.split("=", 1)[1] for word in cmdline.split() if word.startswith("ryxos.probe=")]
+    if not modes:
+        return "nested"
+    if len(modes) != 1 or modes[0] not in {"boot", "nested"}:
+        raise RuntimeError("Expected one supported ryxos.probe mode")
+    return modes[0]
+
+
+def probe(mode: str = "nested") -> dict:
+    result = {"schema": 1, "status": "failed", "mode": mode, "vm_booted": False}
     try:
+        if mode == "boot":
+            if not Path("/run/current-system").is_dir():
+                raise RuntimeError("NixOS has not activated its system profile")
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            if str(uuid.UUID(boot_id)) != boot_id:
+                raise RuntimeError("Guest boot identity is not canonical")
+            command = subprocess.run(
+                [sys.executable, "-c", "print('RYXOS_XEN_BOOT_OK')"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if command.stdout.strip() != "RYXOS_XEN_BOOT_OK":
+                raise RuntimeError("Guest command returned an unexpected response")
+            result.update(
+                status="passed",
+                guest_booted=True,
+                guest_boot_id=boot_id,
+                command_output=command.stdout.strip(),
+                command_exit_code=command.returncode,
+                nested_probe="not_requested",
+            )
+            return result
+        if mode != "nested":
+            raise RuntimeError("Unsupported probe mode")
         cpuinfo = Path("/proc/cpuinfo").read_text()
         flags = set()
         for line in cpuinfo.splitlines():
@@ -40,7 +76,7 @@ def probe() -> dict:
         finally:
             os.close(kvm_fd)
         result["status"] = "passed"
-    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         result["error"] = str(error)
     return result
 
@@ -48,7 +84,10 @@ def probe() -> dict:
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: probe.py RESULT_JSON")
-    result = probe()
+    try:
+        result = probe(probe_mode(Path("/proc/cmdline").read_text()))
+    except (OSError, RuntimeError) as error:
+        result = {"schema": 1, "status": "failed", "vm_booted": False, "error": str(error)}
     target = Path(sys.argv[1])
     with target.open("w") as stream:
         os.chmod(target, 0o600)

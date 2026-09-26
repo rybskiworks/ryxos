@@ -66,19 +66,47 @@
         ];
       };
       packages.${system} = {
+        xen-lab-preflight = pkgs.writeShellApplication {
+          name = "xen-lab-preflight";
+          runtimeInputs = [
+            pkgs.python3
+            pkgs.util-linux
+          ];
+          text = ''
+            exec python3 ${./scripts/lab-preflight.py} "$@"
+          '';
+        };
         preview = self.nixosConfigurations.preview.config.system.build.vm;
         desktop-preview = self.nixosConfigurations.desktop-preview.config.system.build.vm;
         leaf-preview = self.nixosConfigurations.leaf-preview.config.system.build.vm;
         xen-dom0-test-driver = xenLab.tests.dom0.driver;
         xen-hvm-test-driver = xenLab.tests.hvm.driver;
-        xen-pvh-test-driver = xenLab.tests.pvh.driver;
+        xen-experimental-hvm-nested-test-driver = xenLab.tests.experimentalHvmNested.driver;
+        xen-experimental-pvh-nested-test-driver = xenLab.tests.experimentalPvhNested.driver;
+        xen-experimental-hvm-nested-test = xenLab.tests.experimentalHvmNested;
+        xen-experimental-pvh-nested-test = xenLab.tests.experimentalPvhNested;
         default = self.packages.${system}.preview;
       };
+      apps.${system}.xen-lab-preflight = {
+        type = "app";
+        program = "${self.packages.${system}.xen-lab-preflight}/bin/xen-lab-preflight";
+      };
       checks.${system} = {
+        lab-preflight =
+          pkgs.runCommand "ryxos-lab-preflight-tests" { nativeBuildInputs = [ pkgs.python3 ]; }
+            ''
+              export PYTHONDONTWRITEBYTECODE=1
+              python3 -m unittest discover -s ${./.}/tests -p 'test_*.py'
+              touch "$out"
+            '';
+        xen-probes = pkgs.runCommand "ryxos-xen-probe-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          export PYTHONDONTWRITEBYTECODE=1
+          python3 -m unittest discover -s ${./tests/xen} -p 'test_probe.py'
+          touch "$out"
+        '';
         xen-domains = import ./tests/xen-domains.nix { inherit pkgs; };
         xen-dom0 = xenLab.tests.dom0;
         xen-hvm = xenLab.tests.hvm;
-        xen-pvh = xenLab.tests.pvh;
         leaf = import ./tests/leaf.nix {
           inherit pkgs baseModule;
           leafModule = self.nixosModules.nonvirtualizingGuest;

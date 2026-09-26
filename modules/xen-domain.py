@@ -140,6 +140,21 @@ def owned_live(spec, receipt):
     return live
 
 
+def status(spec, path):
+    receipt = load_receipt(path, spec)
+    live = matching_domain(spec, read_inventory(spec))
+    if (live is not None and receipt is not None and receipt.get("domid") is not None
+            and live["domid"] != receipt["domid"]):
+        raise Refused("Domain ID changed since creation; refusing ownership status")
+    return {
+        "action": "status", "name": spec["name"], "uuid": spec["uuid"],
+        "status": "present" if live is not None else "absent",
+        "domid": live["domid"] if live is not None else None,
+        "receipt_phase": receipt["phase"] if receipt is not None else None,
+        "owned": live is not None and receipt is not None and receipt["phase"] == "owned",
+    }
+
+
 def stop(spec, path):
     receipt = load_receipt(path, spec)
     live = matching_domain(spec, read_inventory(spec))
@@ -192,7 +207,7 @@ def manager_lock(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", required=True, type=Path)
-    parser.add_argument("action", choices=("start", "stop"))
+    parser.add_argument("action", choices=("start", "stop", "status"))
     args = parser.parse_args()
     def interrupted(_signum, _frame):
         raise Refused("Interrupted; any incomplete creation retains its ownership receipt")
@@ -212,6 +227,9 @@ def main():
         if type(spec["destroyOnTimeout"]) is not bool:
             raise Refused("Destroy policy must be explicit boolean")
         directory = Path(spec["stateDirectory"])
+        if args.action == "status":
+            print(json.dumps(status(spec, directory / (spec["name"] + ".json"))))
+            return 0
         with manager_lock(directory):
             action = start if args.action == "start" else stop
             action(spec, directory / (spec["name"] + ".json"))

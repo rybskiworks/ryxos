@@ -29,10 +29,13 @@ The optional `desktop` module enables niri through `ryxos.desktop.enable`. Users
 
 Read [composition boundaries](docs/architecture.md) before selecting a recursive topology. Xen nesting is experimental; each actual hypervisor chain requires its own runtime qualification.
 
+The [independent lab plan](docs/labs.md) separates ordinary Xen guest acceptance
+from downstream KVM workload acceptance and the optional combined experiment.
+
 The [Xen domain module](docs/xen-domains.md) provides explicit domain ownership and bounded systemd lifecycle without imposing image or network topology.
 
 ## Validation
 
-`just evaluate` checks all configurations without building. `just check` builds the declared checks, including real Xen boot and nested KVM API tests. Xen checks require a builder with usable KVM and nested CPU capabilities; they refuse a software-emulation fallback.
+`just evaluate` checks all configurations without building. `just check` builds the declared checks, including real Xen boot with an ordinary HVM guest. Nested HVM/PVH probes are separate experimental package outputs. Xen checks require a builder with usable KVM and appropriate host CPU capabilities; they refuse a software-emulation fallback.
 
 `nix run .#preview` starts a disposable console system. `nix run .#desktop-preview` starts the niri example with QEMU VirGL. The disposable login is `preview` / `preview`.

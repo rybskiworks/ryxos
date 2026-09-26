@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -205,6 +207,85 @@ class LifecycleTests(unittest.TestCase):
         domain.stop(self.spec, self.receipt)
         domain.stop(self.spec, self.receipt)
         self.assertFalse(self.receipt.exists())
+
+    def test_status_before_start_does_not_create_state(self):
+        spec = self.spec | {"stateDirectory": str(self.directory / "absent-state")}
+        spec_path = self.directory / "spec.json"
+        spec_path.write_text(json.dumps(spec))
+        output = io.StringIO()
+        with patch.object(domain.sys, "argv", ["xen-domain", "--spec", str(spec_path), "status"]):
+            with patch.object(domain.signal, "signal"), contextlib.redirect_stdout(output):
+                self.assertEqual(domain.main(), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["status"], "absent")
+        self.assertFalse(result["owned"])
+        self.assertIsNone(result["receipt_phase"])
+        self.assertFalse(Path(spec["stateDirectory"]).exists())
+        self.assertEqual(self.actions(), [])
+
+    def test_status_observes_owned_domain_without_writing(self):
+        domain.start(self.spec, self.receipt)
+        self.xl.calls.clear()
+        before = self.receipt.read_bytes(), self.receipt.stat().st_mtime_ns
+        result = domain.status(self.spec, self.receipt)
+        self.assertEqual(result["status"], "present")
+        self.assertEqual(result["domid"], 42)
+        self.assertEqual(result["receipt_phase"], "owned")
+        self.assertTrue(result["owned"])
+        self.assertEqual((self.receipt.read_bytes(), self.receipt.stat().st_mtime_ns), before)
+        self.assertFalse((self.directory / "manager.lock").exists())
+        self.assertEqual(self.actions(), [])
+
+    def test_status_does_not_adopt_or_retire_ambiguous_ownership(self):
+        self.xl.live = [{"domid": 42, "name": self.spec["name"], "uuid": self.spec["uuid"]}]
+        result = domain.status(self.spec, self.receipt)
+        self.assertEqual(result["status"], "present")
+        self.assertFalse(result["owned"])
+        self.assertFalse(self.receipt.exists())
+        intent = {"schema": 1, "name": self.spec["name"], "uuid": self.spec["uuid"], "phase": "creating"}
+        domain.write_receipt(self.receipt, intent)
+        before = self.receipt.read_bytes()
+        for live in (self.xl.live, []):
+            self.xl.live = live
+            result = domain.status(self.spec, self.receipt)
+            self.assertFalse(result["owned"])
+            self.assertEqual(result["receipt_phase"], "creating")
+            self.assertEqual(self.receipt.read_bytes(), before)
+        self.assertEqual(self.actions(), [])
+
+    def test_status_does_not_retire_exited_domain_receipt(self):
+        domain.start(self.spec, self.receipt)
+        self.xl.live = []
+        self.xl.calls.clear()
+        before = self.receipt.read_bytes()
+        result = domain.status(self.spec, self.receipt)
+        self.assertEqual(result["status"], "absent")
+        self.assertEqual(result["receipt_phase"], "owned")
+        self.assertFalse(result["owned"])
+        self.assertEqual(self.receipt.read_bytes(), before)
+        self.assertEqual(self.actions(), [])
+
+    def test_status_refuses_changed_identity_without_actions(self):
+        domain.start(self.spec, self.receipt)
+        self.xl.calls.clear()
+        self.xl.live[0]["domid"] = 43
+        with self.assertRaisesRegex(domain.Refused, "ID changed"):
+            domain.status(self.spec, self.receipt)
+        self.xl.live[0]["domid"] = 42
+        self.xl.live[0]["uuid"] = "a3f70b01-3a87-4b5a-a77e-6238f6b78123"
+        with self.assertRaisesRegex(domain.Refused, "conflicts"):
+            domain.status(self.spec, self.receipt)
+        self.assertEqual(self.actions(), [])
+
+    def test_status_refuses_changed_declaration_without_adoption(self):
+        domain.start(self.spec, self.receipt)
+        self.xl.calls.clear()
+        changed = self.spec | {"uuid": "a3f70b01-3a87-4b5a-a77e-6238f6b78123"}
+        before = self.receipt.read_bytes()
+        with self.assertRaisesRegex(domain.Refused, "different domain configuration"):
+            domain.status(changed, self.receipt)
+        self.assertEqual(self.receipt.read_bytes(), before)
+        self.assertEqual(self.xl.calls, [])
 
     def test_incomplete_json_inventory_fails_closed(self):
         replies = ["Name ID Mem VCPUs State Time(s)\nDomain-0 0 2048 2 r----- 0.0\nother 9 1024 1 r----- 0.0\n", "[]"]

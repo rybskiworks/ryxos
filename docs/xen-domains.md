@@ -23,6 +23,18 @@ The host must separately enable `virtualisation.xen.enable` with a compatible bo
 
 Use `systemctl start ryxos-xen-example` and `systemctl stop ryxos-xen-example`. Autostart is opt-in. Declared services serialize their start/stop transactions without starting or depending on peers. The module neither creates nor erases disks. It does not save, migrate or automatically restart guests.
 
+A NixOS generation switch does not restart or reload a retained domain service when its declaration changes. Explicit stop and host shutdown still use its lifecycle stop action. Stop an owned domain before changing or removing its identity, boot artifacts or disk declaration; a new declaration does not adopt an existing domain, and a changed UUID cannot match the previous ownership receipt.
+
+Retain the original immutable configuration, boot and backing-image closures while a domain or its writable disk overlay exists. The module does not yet create an independent GC lease for them: receipt files are ordinary data, not Nix GC roots. Preserve the original system generation or explicitly root the required closures until the domain is stopped and its overlay is retired. A NixOS rollback changes declarations, not guest disk contents.
+
+Inspect actual Xen inventory and ownership with:
+
+```sh
+sudo ryxos-xen-domain --spec /etc/ryxos/xen-domains/example.json status
+```
+
+Status returns JSON with the observed `present` or `absent` state, domain ID, receipt phase and an `owned` boolean. A matching live domain without a receipt, or with only a `creating` receipt, is not reported as owned. Identity conflicts fail closed. This is a read-only snapshot: it neither creates state nor adopts, stops or retires a domain, and concurrent lifecycle activity may require a retry. Presence does not distinguish paused or shutting-down domains and does not test guest health.
+
 ## Ownership and failure
 
 Creation refuses an existing name or UUID, including an exact match. A private ownership receipt records intent before creation and the domain ID afterward. Stop verifies name, UUID and recorded ID before acting. Conflicting or incomplete inventories fail closed.

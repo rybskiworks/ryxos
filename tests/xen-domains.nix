@@ -89,6 +89,12 @@ let
     (builtins.elem "ryxos-xen-sample.service" threeManual.systemd.services.ryxos-xen-third.after)
     (builtins.elem "ryxos-xen-second.service" threeManual.systemd.services.ryxos-xen-third.after)
     (valid.systemd.services.ryxos-xen-sample.serviceConfig.KillMode == "process")
+    (!valid.systemd.services.ryxos-xen-sample.restartIfChanged)
+    (!valid.systemd.services.ryxos-xen-sample.stopIfChanged)
+    (!valid.systemd.services.ryxos-xen-sample.reloadIfChanged)
+    (!automatic.systemd.services.ryxos-xen-sample.restartIfChanged)
+    (!automatic.systemd.services.ryxos-xen-sample.stopIfChanged)
+    (lib.hasSuffix " stop" valid.systemd.services.ryxos-xen-sample.serviceConfig.ExecStop)
     (!valid.ryxos.xenDomains.domains.sample.destroyOnTimeout)
   ];
 in

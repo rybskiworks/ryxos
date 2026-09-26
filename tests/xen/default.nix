@@ -28,13 +28,18 @@ let
     additionalSpace = "128M";
   };
   mkTest =
-    guestType:
+    {
+      guestType,
+      nested ? false,
+    }:
     import ./test.nix {
+      nixpkgsRevision = nixpkgs.rev;
       inherit
         pkgs
         guest
         rootImage
         guestType
+        nested
         baseModule
         ;
     };
@@ -42,9 +47,16 @@ in
 {
   inherit rootImage;
   tests = {
-    dom0 = mkTest null;
-    hvm = mkTest "hvm";
-    pvh = mkTest "pvh";
+    dom0 = mkTest { guestType = null; };
+    hvm = mkTest { guestType = "hvm"; };
+    experimentalHvmNested = mkTest {
+      guestType = "hvm";
+      nested = true;
+    };
+    experimentalPvhNested = mkTest {
+      guestType = "pvh";
+      nested = true;
+    };
   };
   plan = {
     nixpkgsRevision = nixpkgs.rev;
@@ -64,6 +76,6 @@ in
       embeddedInDom0 = false;
     };
     testStatus = "not_run";
-    scope = "Xen-in-KVM boot and domU KVM API; no nested workload boot or physical-host qualification";
+    scope = "Basic Xen-in-KVM HVM boot with nesting off; optional experimental nested HVM/PVH KVM API probes. No managed guest lifecycle, reset or physical-host qualification.";
   };
 }

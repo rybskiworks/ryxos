@@ -138,6 +138,9 @@ in
       lib.nameValuePair "ryxos-xen-${name}" {
         description = "Manage the ${name} Xen domain";
         wantedBy = lib.optionals domain.autoStart [ "multi-user.target" ];
+        # Applying a new declaration must not replace a running guest.
+        restartIfChanged = false;
+        stopIfChanged = false;
         requires = [
           "xen-init-dom0.service"
           "xenstored.service"
