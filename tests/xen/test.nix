@@ -79,12 +79,13 @@ pkgs.testers.runNixOSTest {
   testScript = { nodes, ... }: ''
     import json
     import os
+    import shlex
     from pathlib import Path
     ${lib.optionalString withGuest "import uuid"}
-    ${lib.optionalString withGuest "import shlex"}
 
     qemu_script = Path("${nodes.dom0.system.build.vm}/bin/run-${nodes.dom0.networking.hostName}-vm").read_text()
     assert "-virtfs" not in qemu_script and "-fsdev" not in qemu_script, "Host directory sharing is forbidden"
+    assert "-machine q35" in qemu_script and "-no-user-config" in qemu_script, "Explicit outer QEMU policy is missing"
     dom0.start()
     dom0.wait_for_unit("multi-user.target")
     dom0.wait_for_unit("xenstored.service")
@@ -93,6 +94,23 @@ pkgs.testers.runNixOSTest {
     domain_rows = dom0.succeed("xl list").strip().splitlines()[1:]
     assert len(domain_rows) == 1, domain_rows
     assert domain_rows[0].split()[1] == "0", domain_rows
+    boot_entry_script = (
+        "import json,pathlib\n"
+        "config = pathlib.Path('${nodes.dom0.boot.loader.efi.efiSysMountPoint}/loader/loader.conf').read_text()\n"
+        "defaults = [line.split()[1] for line in config.splitlines() if line.split() and line.split()[0] == 'default']\n"
+        "assert len(defaults) == 1 and defaults[0].startswith('xen-'), defaults\n"
+        "entry = pathlib.Path('/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f')\n"
+        "selected = None\n"
+        "if entry.exists():\n"
+        "    raw = entry.read_bytes()\n"
+        "    assert 6 <= len(raw) <= 4096, 'Invalid EFI entry size'\n"
+        "    selected = raw[4:].decode('utf-16-le').rstrip('\\0')\n"
+        "    assert selected.startswith('xen-') and pathlib.PurePosixPath(selected).name == selected and '\\0' not in selected, selected\n"
+        "print(json.dumps({'configured_default': defaults[0], 'observed_selected': selected, 'selection_evidence': 'uefi-variable' if selected else 'configured-default-only'}))\n"
+    )
+    boot_entry = json.loads(dom0.succeed(
+        "/run/current-system/sw/bin/python3 -c " + shlex.quote(boot_entry_script)))
+    bootctl_code, bootctl_output = dom0.execute("bootctl status --no-pager", timeout=15)
     receipt: dict[str, object] = {
         "schema": 1,
         "xen_version": "${pkgs.xen.version}",
@@ -103,6 +121,10 @@ pkgs.testers.runNixOSTest {
             "dom0_kernel_version": "${nodes.dom0.system.build.kernel.version}",
         },
         "xl_info": xl_info[-8192:],
+        "boot_entry": boot_entry,
+        "bootctl_status": {"exit_code": bootctl_code, "output": bootctl_output[-8192:]},
+        "outer_machine": "q35",
+        "qemu_user_config": False,
         "dom0_booted": True,
         "guest_type": ${if withGuest then ''"${guestType}"'' else "None"},
         "guest_kvm": None,
@@ -123,9 +145,14 @@ pkgs.testers.runNixOSTest {
               "qemu_snapshot_configured": True,
               "image_absent_from_dom0_store": True,
           }
-          dom0.succeed("xl create /etc/xen/${
-            if nested then "kvm" else "boot"
-          }-probe-${guestType}.cfg", timeout=90)
+          create_command = "xl create /etc/xen/${if nested then "kvm" else "boot"}-probe-${guestType}.cfg"
+          if ${if guestType == "hvm" then "True" else "False"}:
+              # Xen 4.20 uses an alias removed by QEMU 11. These new disposable
+              # guests select a versioned ABI; this is not a migration policy.
+              machine_override = 'device_model_args_hvm=["-machine","xenfv-4.2,suppress-vmdesc=on"]'
+              create_command += " " + shlex.quote(machine_override)
+              receipt["device_model_machine"] = "xenfv-4.2"
+          dom0.succeed(create_command, timeout=90)
           # The result is read from an unmounted disk only after xl reports
           # the guest absent, including the guest's own failed-probe receipt.
           dom0.wait_until_fails("xl domid ${domainName}", timeout=180)
@@ -157,6 +184,21 @@ pkgs.testers.runNixOSTest {
               diagnostics["xl_info"] = {"exit_code": code, "output": output[-8192:]}
           except BaseException as diagnostic_error:
               diagnostics["xl_info_error"] = str(diagnostic_error)[:2048]
+          for diagnostic_name, command in [
+              ("guest_state", "xl list -l ${domainName}"),
+              ("guest_console", "set -o pipefail; timeout --kill-after=2s 8s xl console -t pv -n 0 ${domainName} </dev/null 2>&1 | tail -c 32768"),
+          ]:
+              try:
+                  code, output = dom0.execute(command, timeout=15)
+                  diagnostics[diagnostic_name] = {
+                      "exit_code": code,
+                      "output": output[-32768:],
+                      # A running guest keeps its console open. This timeout
+                      # bounds read-only capture and is not a new boot failure.
+                      "capture_timed_out": diagnostic_name == "guest_console" and code == 124,
+                  }
+              except BaseException as diagnostic_error:
+                  diagnostics[diagnostic_name + "_error"] = str(diagnostic_error)[:2048]
           log_script = (
               "import glob,json,os,stat\n"
               "records = []\n"

@@ -11,7 +11,11 @@
     graphics = false;
     vlans = [ ];
     qemu = {
-      options = [ "-cpu host" ];
+      options = [
+        "-cpu host"
+        "-machine q35"
+        "-no-user-config"
+      ];
       networkingOptions = lib.mkForce [ "-nic none" ];
     };
     xen = {
