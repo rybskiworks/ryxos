@@ -27,6 +27,9 @@ Use `nonvirtualizingGuest` for a guest that must not create children. Neither pr
 
 The optional `desktop` module enables niri through `ryxos.desktop.enable`. Users, Home Manager, themes, GPUs and secrets remain caller choices. `xenHost` enables the NixOS Xen integration; the consumer supplies a compatible bootloader, hardware and explicit dom0 resource budget. `xenGuest` adds the upstream domU driver profile.
 
+The Xen host profile also preserves the upstream settings while correcting the
+pinned [OCaml Xenstore configuration rendering](docs/xenstore-settings.md).
+
 Read [composition boundaries](docs/architecture.md) before selecting a recursive topology. Xen nesting is experimental; each actual hypervisor chain requires its own runtime qualification.
 
 The [independent lab plan](docs/labs.md) separates ordinary Xen guest acceptance

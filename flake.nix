@@ -190,6 +190,7 @@
         '';
         xen-domains = import ./tests/xen-domains.nix { inherit pkgs; };
         xen-control = import ./tests/xen-control.nix { inherit pkgs; };
+        xenstore-config = import ./tests/xenstore-config.nix { inherit pkgs; };
         xen-dom0 = xenLab.tests.dom0;
         xen-hvm = xenLab.tests.hvm;
         xen-lifecycle = xenLifecycle.test;

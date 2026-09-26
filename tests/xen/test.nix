@@ -87,6 +87,7 @@ pkgs.testers.runNixOSTest {
   testScript = { nodes, ... }: ''
     import json
     import os
+    import runpy
     import shlex
     from pathlib import Path
     ${lib.optionalString withGuest "import uuid"}
@@ -97,6 +98,8 @@ pkgs.testers.runNixOSTest {
     dom0.start()
     dom0.wait_for_unit("multi-user.target")
     dom0.wait_for_unit("xenstored.service")
+    xenstore = runpy.run_path("${./xenstore.py}")["check"](
+        dom0, "${nodes.dom0.virtualisation.xen.store.path}")
     dom0.succeed("grep -Fx control_d /proc/xen/capabilities")
     xl_info = dom0.succeed("xl info")
     domain_rows = dom0.succeed("xl list").strip().splitlines()[1:]
@@ -129,6 +132,7 @@ pkgs.testers.runNixOSTest {
             "dom0_kernel_version": "${nodes.dom0.system.build.kernel.version}",
         },
         "xl_info": xl_info[-8192:],
+        "xenstore": xenstore,
         "boot_entry": boot_entry,
         "bootctl_status": {"exit_code": bootctl_code, "output": bootctl_output[-8192:]},
         "outer_machine": "q35",

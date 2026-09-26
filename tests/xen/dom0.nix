@@ -1,5 +1,9 @@
 { lib, pkgs, ... }:
+let
+  xenstoreConfig = import ../xenstore-config.nix { inherit pkgs; };
+in
 {
+  imports = [ ../../profiles/xen-host.nix ];
   virtualisation = {
     memorySize = 6144;
     cores = 4;
@@ -67,5 +71,9 @@
     pkgs.e2fsprogs
     pkgs.python3
   ];
+  environment.etc = {
+    "ryxos-test/check_xenstore_config.py".source = ../check_xenstore_config.py;
+    "ryxos-test/xenstore-config-fixtures.json".source = xenstoreConfig.fixturesFile;
+  };
   system.stateVersion = "26.05";
 }
