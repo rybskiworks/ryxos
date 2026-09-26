@@ -26,7 +26,9 @@ let
       altp2m = 0
       kernel = "${kernel}"
       ramdisk = "${initrd}"
-      extra = "init=${guest.config.system.build.toplevel}/init root=/dev/xvda console=hvc0"
+      # The guest disk owns its installed profile. Referring to its toplevel here
+      # would also embed that complete closure in dom0's disk image.
+      extra = "init=/nix/var/nix/profiles/system/init root=/dev/xvda console=hvc0"
       disk = [ "format=raw,vdev=xvda,access=rw,backendtype=phy,target=${disk}" ]
       vif = [ ]
       on_poweroff = "destroy"
