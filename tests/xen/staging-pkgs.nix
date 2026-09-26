@@ -18,8 +18,12 @@ let
     else
       assert lib.assertMsg sourceMatches "Re-review staging lifetime for changed image-builder sources.";
       assert lib.assertMsg (
-        builtins.hashString "sha256" (drv.preVM or "")
-        == "d78267baa8518b4bd391530c96309dc9a7e01b3dc7c00cc4e6985f42013b1e05"
+        lib.elem (builtins.hashString "sha256" (drv.preVM or "")) [
+          # Closed lifecycle fixture.
+          "d78267baa8518b4bd391530c96309dc9a7e01b3dc7c00cc4e6985f42013b1e05"
+          # The same fixture with its fixed host-loopback SSH transport.
+          "14eb1d35755c1f409d0284f981cbe2f2a1f44d33a623f85e6d9793176af4d3bb"
+        ]
         &&
           builtins.hashString "sha256" (drv.postVM or "")
           == "8139751e9d48503641bd4f51e605dcf354c1a0bd11f8e63c5825c4bfb5ce770c"

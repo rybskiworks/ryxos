@@ -53,6 +53,32 @@ disposable cooperative lab; they do not protect it from other local users with
 the same public test key. This remains a finite driver interface, without an
 interactive session or a general network exception.
 
+The separate host-route fixture has a fixed supervised entry point:
+
+```sh
+nix run .#xen-control-host-smoke -- "$PWD/lab-evidence"
+```
+
+It reserves 6144 MiB for dom0 plus 2048 MiB QEMU overhead, four vCPUs and a
+1500-second deadline. `xen-control-host-test-driver` exposes its driver and
+`checks.x86_64-linux.xen-control-host` exposes the corresponding test. Its
+constructor selects `sshTransport = "host-loopback"`; the ordinary lifecycle
+fixture defaults to `"guest-loopback"` and retains its closed launcher.
+
+The host client uses pinned OpenSSH with fresh synthetic key and known-host
+files in the private evidence directory. Shared assertions exercise admitted
+actions, authentication and command refusals, and require the exact SLIRP audit
+peer `10.0.2.2`. An owned ephemeral loopback server provides a positive host
+control before testing denial of an unforwarded guest connection. That probe
+does not claim a separately observed external-network denial.
+
+The interim SSH receipt remains unqualified. Only successful SSH assertions,
+graceful guest cleanup, dom0 shutdown, host listener disappearance and key cleanup
+permit a final `operator_host_route_qualified` result. Forced termination can
+leave synthetic files in private evidence; it cannot establish qualification.
+The host-route source and portable checks are implemented, but native acceptance
+is pending. Building its image and driver is separate from the supervised run.
+
 Admission checks usable KVM, the already enabled host nested parameter, complete
 online SMT groups and free disk/RAM. It reserves two physical cores by default,
 selects enough remaining complete groups for the requested vCPUs, and requires

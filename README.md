@@ -55,6 +55,13 @@ supervisor for the managed disk, generation-change, reset and restricted SSH
 fixture. Its SSH exchange stays inside dom0 over loopback with public test keys;
 it does not expose a host listener or enroll a real operator key.
 
+`nix run .#xen-control-host-smoke -- "$PWD/lab-evidence"` selects the separate
+fixed host SSH fixture. It admits only the restricted loopback forward described
+in the [supervisor documentation](docs/lab-supervisor.md), uses public synthetic
+keys and requires the port to be free. Its source checks are implemented; native
+host-route acceptance remains pending. It is not a production SSH enrollment or
+an interactive management session.
+
 ## Validation
 
 `just evaluate` checks all configurations without building. `just check` builds the declared checks, including real Xen boot with an ordinary HVM guest. Nested HVM/PVH probes are separate experimental package outputs. Xen checks require a builder with usable KVM and appropriate host CPU capabilities; they refuse a software-emulation fallback.

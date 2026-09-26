@@ -4,13 +4,19 @@
   baseModule,
   xenDomainsModule,
   xenControlModule,
+  sshTransport ? "guest-loopback",
 }:
 let
   inherit (pkgs) lib;
+  hostMode = sshTransport == "host-loopback";
+  indent =
+    text:
+    lib.concatMapStrings (line: if line == "" then "" else "    ${line}\n") (lib.splitString "\n" text);
   domainName = "ryxos-lifecycle";
   domainUuid = "adf2c635-e41c-477e-a3ad-ef936084437d";
   control = import ./control.nix {
     inherit pkgs domainName xenControlModule;
+    transport = sshTransport;
   };
   guest = nixpkgs.lib.nixosSystem {
     system = pkgs.stdenv.hostPlatform.system;
@@ -63,11 +69,12 @@ let
       on_crash = "destroy"
     '';
   test = pkgs.testers.runNixOSTest {
-    name = "xen-managed-lifecycle";
+    name = if hostMode then "xen-control-host-smoke" else "xen-managed-lifecycle";
     globalTimeout = 1200;
     qemu.forceAccel = true;
     # Release the reviewed builder's staging copy before raw-to-qcow2 conversion.
     # This affects only the test node's image constructor, not its system closure.
+    # Each transport's exact phases are checked by the image constructor guard.
     node.pkgs = lib.mkForce (import ./staging-pkgs.nix { inherit pkgs; });
     nodes.dom0 = {
       imports = [
@@ -135,7 +142,7 @@ let
             "synthetic_ssh_fixture": True, "physical_host_qualified": False,
         }
         started = False
-
+        ${control.initialState}
         def command(action):
             return helper + " " + action + " " + name
 
@@ -231,13 +238,20 @@ let
             launcher = Path("${nodes.dom0.system.build.vm}/bin/run-${nodes.dom0.networking.hostName}-vm").read_text()
             assert "-virtfs" not in launcher and "-fsdev" not in launcher, "No host filesystem sharing"
             assert "-nic none" in launcher and "-no-user-config" in launcher, "Explicit outer isolation is missing"
-            dom0.start()
+        ${indent control.beforeStart}    dom0.start()
             started = True
             dom0.wait_for_unit("multi-user.target")
             dom0.wait_for_unit("xenstored.service")
             dom0.wait_for_unit("xenconsoled.service")
             dom0.succeed("grep -Fx control_d /proc/xen/capabilities")
-            dom0.succeed("test $(ls /sys/class/net | wc -l) = 1 && test -d /sys/class/net/lo")
+            dom0.succeed(${
+              builtins.toJSON (
+                if hostMode then
+                  "test $(ls /sys/class/net | wc -l) = 2 && test -d /sys/class/net/lo && test -d /sys/class/net/eth0"
+                else
+                  "test $(ls /sys/class/net | wc -l) = 1 && test -d /sys/class/net/lo"
+              )
+            })
             dom0.succeed("nix-store --verify --check-contents", timeout=180)
             assert inventory() == [], "The test must start with only domain zero"
             initial_spec = dom0.succeed("readlink -f /etc/ryxos/xen-domains/" + name + ".json").strip()
@@ -334,11 +348,15 @@ let
                     receipt["status"] = "failed"
                     receipt["dom0_shutdown"] = False
                     receipt["shutdown_error"] = str(shutdown_error)[:4096]
-            (Path(os.environ["out"]) / "xen-managed-lifecycle-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        ${indent control.afterShutdown}    (Path(os.environ["out"]) / "xen-managed-lifecycle-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         assert receipt["status"] == "passed", receipt
       '';
   };
 in
+assert lib.elem sshTransport [
+  "guest-loopback"
+  "host-loopback"
+];
 {
   inherit guest rootImage test;
   plan = {

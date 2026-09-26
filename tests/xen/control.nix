@@ -2,6 +2,7 @@
   pkgs,
   domainName,
   xenControlModule,
+  transport ? "guest-loopback",
 }:
 let
   inherit (pkgs) lib;
@@ -10,17 +11,53 @@ let
   account = "ryxos-xen-control";
   directory = "/etc/ryxos-control-test";
   port = 22222;
+  hostMode = transport == "host-loopback";
+  host = import ./host-control.nix { inherit pkgs keys; };
+  listener = if hostMode then "10.0.2.15" else "127.0.0.1";
+  auditPeer = if hostMode then "10.0.2.2" else "127.0.0.1";
+  indent =
+    text:
+    lib.concatMapStrings (line: if line == "" then "" else "    ${line}\n") (lib.splitString "\n" text);
+  clientScript =
+    if hostMode then
+      host.clientScript
+    else
+      ''
+        ssh_target = "${account}@127.0.0.1"
+        ssh_base = [
+            "${pkgs.openssh}/bin/ssh", "-F", "/dev/null", "-p", "${toString port}",
+            "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+            "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=${directory}/known_hosts",
+            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5",
+            "-o", "ConnectionAttempts=1",
+        ]
+
+        def ssh_call(remote=None, options=None, timeout=20, key="${directory}/operator_ed25519", log_level="ERROR"):
+            arguments = ssh_base + ["-i", key, "-o", "LogLevel=" + log_level]
+            arguments += (["-T"] if options is None else options) + [ssh_target]
+            if remote is not None:
+                arguments.append(remote)
+            # Both timeouts are bounded. All interpolation is an argv quoted by
+            # shlex; adversarial remote text never executes in the client's shell.
+            arguments = ["timeout", "--signal=TERM", "--kill-after=2s", str(timeout) + "s"] + arguments
+            return dom0.execute(shlex.join(arguments) + " </dev/null 2>&1", timeout=timeout + 5)
+
+      '';
 in
+assert lib.elem transport [
+  "guest-loopback"
+  "host-loopback"
+];
 {
   module = {
-    imports = [ xenControlModule ];
+    imports = [ xenControlModule ] ++ lib.optional hostMode host.module;
     services.openssh = {
       enable = true;
       openFirewall = false;
       ports = lib.mkForce [ port ];
       listenAddresses = lib.mkForce [
         {
-          addr = "127.0.0.1";
+          addr = listener;
           inherit port;
         }
       ];
@@ -56,37 +93,25 @@ in
     };
   };
 
+  initialState = lib.optionalString hostMode host.initialState;
+  beforeStart = lib.optionalString hostMode host.beforeStart;
+  afterShutdown = lib.optionalString hostMode host.afterShutdown;
+
   # Compose inside the lifecycle test's try block, after its final absent reset.
   # That test supplies dom0, receipt, inventory(), owned(), ready(previous_ids),
   # and the first_boot/second_boot/boot_after_reset guest readiness receipts.
   testScript = ''
     ssh_receipt: dict[str, Any] = {
-        "schema": 1, "status": "running", "transport": "guest-loopback",
+        "schema": 1, "status": "running", "transport": "${transport}",
         "production_credentials": False, "synthetic_keys": True,
         "host_network_connection": False, "operator_host_route_qualified": False,
         "actions": {}, "refusals": {},
     }
     receipt["ssh_control"] = ssh_receipt
     ssh_guest_may_exist = False
-    ssh_target = "${account}@127.0.0.1"
-    ssh_base = [
-        "${pkgs.openssh}/bin/ssh", "-F", "/dev/null", "-p", "${toString port}",
-        "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
-        "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=${directory}/known_hosts",
-        "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5",
-        "-o", "ConnectionAttempts=1",
-    ]
-
-    def ssh_call(remote=None, options=None, timeout=20, key="${directory}/operator_ed25519", log_level="ERROR"):
-        arguments = ssh_base + ["-i", key, "-o", "LogLevel=" + log_level]
-        arguments += (["-T"] if options is None else options) + [ssh_target]
-        if remote is not None:
-            arguments.append(remote)
-        # Both timeouts are bounded. All interpolation is an argv quoted by
-        # shlex; adversarial remote text never executes in the client's shell.
-        arguments = ["timeout", "--signal=TERM", "--kill-after=2s", str(timeout) + "s"] + arguments
-        return dom0.execute(shlex.join(arguments) + " </dev/null 2>&1", timeout=timeout + 5)
-
+  ''
+  + clientScript
+  + ''
     def ssh_action(action, timeout=20):
         code, output = ssh_call(action + " ${domainName}", timeout=timeout)
         assert code == 0, (action, code, output[-4096:])
@@ -106,7 +131,7 @@ in
         records = dom0.succeed("journalctl -t ryxos-xen-control --after-cursor "
                                + shlex.quote(cursor) + " -o json --no-pager")
         events = [json.loads(json.loads(line)["MESSAGE"]) for line in records.splitlines()]
-        assert events == [{"account": "${account}", "peer": "127.0.0.1",
+        assert events == [{"account": "${account}", "peer": "${auditPeer}",
                            "result": "refused", "exit_code": 64}], (label, events)
         diagnostic = "Only status, start, stop or reset" in output
         # Subsystem channels may suppress extended stderr; the exact exit code
@@ -120,10 +145,15 @@ in
         assert inventory() == [], "SSH qualification must start with no managed guest"
         dom0.wait_for_unit("sshd.service")
         listeners = dom0.succeed("ss -H -ltn 'sport = :${toString port}'").strip().splitlines()
-        assert len(listeners) == 1 and listeners[0].split()[3] == "127.0.0.1:${toString port}", listeners
-        assert dom0.succeed("ls -1 /sys/class/net").strip() == "lo"
-        ssh_receipt["listener"] = "127.0.0.1:${toString port}"
-        initial = ssh_action("status")
+        assert len(listeners) == 1 and listeners[0].split()[3] == "${listener}:${toString port}", listeners
+        ${
+          if hostMode then
+            ''assert sorted(dom0.succeed("ls -1 /sys/class/net").split()) == ["eth0", "lo"]''
+          else
+            ''assert dom0.succeed("ls -1 /sys/class/net").strip() == "lo"''
+        }
+        ssh_receipt["listener"] = "${listener}:${toString port}"
+    ${lib.optionalString hostMode (indent host.beforeActions)}    initial = ssh_action("status")
         assert initial["status"] == "absent" and initial["retained_spec"] is None, initial
 
         for label, remote in [
@@ -141,7 +171,9 @@ in
         dom0.succeed("test ! -e /tmp/ssh-control-escape")
         assert inventory() == [], "Refused commands must not create guests"
 
-        code, output = ssh_call("status ${domainName}", key="${directory}/host_rsa")
+        code, output = ssh_call("status ${domainName}", key=${
+          if hostMode then "host_transport.wrong_key" else builtins.toJSON "${directory}/host_rsa"
+        })
         assert code == 255 and "Permission denied (publickey)" in output, (code, output[-4096:])
         ssh_receipt["refusals"]["unenrolled_key"] = {"exit_code": code, "authentication_diagnostic": True}
 
@@ -220,7 +252,7 @@ in
             ssh_receipt["status"] = "failed"
             ssh_receipt["listener_stopped"] = False
             ssh_receipt["listener_stop_error"] = str(ssh_stop_error)[-2048:]
-        (Path(os.environ["out"]) / "xen-control-receipt.json").write_text(json.dumps(ssh_receipt, indent=2) + "\n")
+    ${lib.optionalString hostMode (indent host.beforeReceipt)}    (Path(os.environ["out"]) / "xen-control-receipt.json").write_text(json.dumps(ssh_receipt, indent=2) + "\n")
     assert ssh_receipt["status"] == "passed", ssh_receipt
   '';
 }

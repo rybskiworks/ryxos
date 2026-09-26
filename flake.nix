@@ -29,6 +29,12 @@
         xenDomainsModule = self.nixosModules.xenDomains;
         xenControlModule = self.nixosModules.xenControl;
       };
+      xenHostControl = import ./tests/xen/lifecycle.nix {
+        inherit nixpkgs pkgs baseModule;
+        xenDomainsModule = self.nixosModules.xenDomains;
+        xenControlModule = self.nixosModules.xenControl;
+        sshTransport = "host-loopback";
+      };
       labRunner = pkgs.writeShellApplication {
         name = "ryxos-lab-run";
         runtimeInputs = [
@@ -111,6 +117,19 @@
               --timeout-seconds 1500
           '';
         };
+        xen-control-host-smoke = pkgs.writeShellApplication {
+          name = "xen-control-host-smoke";
+          text = ''
+            if [[ $# != 1 ]]; then
+              echo "usage: xen-control-host-smoke EVIDENCE_DIRECTORY" >&2
+              exit 2
+            fi
+            exec ${labRunner}/bin/ryxos-lab-run \
+              --driver ${xenHostControl.test.driver}/bin/nixos-test-driver \
+              --output-dir "$1" --memory-mib 6144 --qemu-overhead-mib 2048 --vcpus 4 \
+              --timeout-seconds 1500 --network-profile loopback-ssh
+          '';
+        };
         xen-lab-preflight = pkgs.writeShellApplication {
           name = "xen-lab-preflight";
           runtimeInputs = [
@@ -127,6 +146,7 @@
         xen-dom0-test-driver = xenLab.tests.dom0.driver;
         xen-hvm-test-driver = xenLab.tests.hvm.driver;
         xen-lifecycle-test-driver = xenLifecycle.test.driver;
+        xen-control-host-test-driver = xenHostControl.test.driver;
         xen-experimental-hvm-nested-test-driver = xenLab.tests.experimentalHvmNested.driver;
         xen-experimental-pvh-nested-test-driver = xenLab.tests.experimentalPvhNested.driver;
         xen-experimental-hvm-nested-test = xenLab.tests.experimentalHvmNested;
@@ -150,6 +170,10 @@
           type = "app";
           program = "${self.packages.${system}.xen-lifecycle-smoke}/bin/xen-lifecycle-smoke";
         };
+        xen-control-host-smoke = {
+          type = "app";
+          program = "${self.packages.${system}.xen-control-host-smoke}/bin/xen-control-host-smoke";
+        };
       };
       checks.${system} = {
         lab-preflight =
@@ -169,6 +193,7 @@
         xen-dom0 = xenLab.tests.dom0;
         xen-hvm = xenLab.tests.hvm;
         xen-lifecycle = xenLifecycle.test;
+        xen-control-host = xenHostControl.test;
         leaf = import ./tests/leaf.nix {
           inherit pkgs baseModule;
           leafModule = self.nixosModules.nonvirtualizingGuest;
