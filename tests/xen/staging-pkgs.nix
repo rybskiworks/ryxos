@@ -20,9 +20,9 @@ let
       assert lib.assertMsg (
         lib.elem (builtins.hashString "sha256" (drv.preVM or "")) [
           # Closed lifecycle fixture.
-          "d78267baa8518b4bd391530c96309dc9a7e01b3dc7c00cc4e6985f42013b1e05"
+          "c1f83845d4786698dda10ed8bfdf3ce822d03758b66529cf0bb5a67198f98a3b"
           # The same fixture with its fixed host-loopback SSH transport.
-          "14eb1d35755c1f409d0284f981cbe2f2a1f44d33a623f85e6d9793176af4d3bb"
+          "2f3f237ff44418e39a8fec356ecfad76b4f13e2c1e0c54848b8445ae8745cbc6"
         ]
         &&
           builtins.hashString "sha256" (drv.postVM or "")

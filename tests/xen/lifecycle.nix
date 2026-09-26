@@ -118,6 +118,7 @@ let
       ''
         import json
         import os
+        import runpy
         import shlex
         import time
         import uuid
@@ -242,6 +243,8 @@ let
             started = True
             dom0.wait_for_unit("multi-user.target")
             dom0.wait_for_unit("xenstored.service")
+            receipt["xenstore"] = runpy.run_path("${./xenstore.py}")["check"](
+                dom0, "${nodes.dom0.virtualisation.xen.store.path}")
             dom0.wait_for_unit("xenconsoled.service")
             dom0.succeed("grep -Fx control_d /proc/xen/capabilities")
             dom0.succeed(${
