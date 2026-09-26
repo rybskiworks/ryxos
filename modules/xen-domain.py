@@ -27,6 +27,10 @@ class Refused(RuntimeError):
     pass
 
 
+class InventoryChanged(Refused):
+    """The two Xen inventory views do not establish a complete snapshot."""
+
+
 def valid_name(name):
     if not isinstance(name, str) or not NAME.fullmatch(name):
         raise Refused("Invalid declared domain name")
@@ -176,9 +180,11 @@ def read_inventory(spec):
             raise Refused("Incomplete Xen domain identity")
         domains.append({"domid": domid, "name": info["name"], "uuid": str(uuid.UUID(info["uuid"]))})
     observed_ids = {domain["domid"] for domain in domains}
+    if len(observed_ids) != len(domains):
+        raise Refused("Xen inventory contains duplicate domain IDs")
     # xl can omit domains whose saved configuration cannot be retrieved.
-    if observed_ids != ids - {0} or len(observed_ids) != len(domains):
-        raise Refused("Xen inventory changed or omitted domain metadata; retry after inspection")
+    if observed_ids != ids - {0}:
+        raise InventoryChanged("Xen inventory changed or omitted domain metadata; retry after inspection")
     return domains
 
 
@@ -325,12 +331,16 @@ def config_arguments(spec):
 
 def validate_config(spec):
     parsed = json.loads(run_xl(spec, "create", "--dryrun", *config_arguments(spec)))
+    if not isinstance(parsed, dict):
+        raise Refused("xl configuration must be a JSON object")
     info = parsed.get("c_info", {})
-    if any(info.get(key) != spec[key] for key in ("name", "uuid")):
+    if not isinstance(info, dict) or any(info.get(key) != spec[key] for key in ("name", "uuid")):
         raise Refused("xl configuration name/UUID do not match their declared identity")
+    # Xen 4.20 libxl_types.idl initializes these actions to DESTROY, and
+    # gentypes.py omits fields equal to that default from its JSON output.
     for action in ("on_poweroff", "on_reboot", "on_crash"):
-        if parsed.get(action) != "destroy":
-            raise Refused(f"Managed xl configuration must explicitly use {action}=destroy")
+        if parsed.get(action, "destroy") != "destroy":
+            raise Refused(f"Managed xl configuration must resolve to {action}=destroy")
 
 
 def prepare_disk(spec):
@@ -452,9 +462,16 @@ def stop(name, declarations, *, force=False):
     if live is not None:
         run_xl(spec, "destroy" if force else "shutdown", str(live["domid"]))
         deadline = time.monotonic() + spec["shutdownTimeoutSec"]
-        while owned_live(spec, receipt) is not None:
+        while True:
+            try:
+                if owned_live(spec, receipt) is None:
+                    break
+            except InventoryChanged:
+                # Teardown can remove saved configuration before the domain ID.
+                # Retry observation only; ambiguity never establishes absence.
+                pass
             if time.monotonic() >= deadline:
-                raise Refused("Shutdown timed out; domain left running and state/GC lease retained")
+                raise Refused("Shutdown timed out; domain absence unconfirmed and state/GC lease retained")
             time.sleep(0.25)
     receipt["phase"] = "stopped"
     write_receipt(state_path(name) / "state.json", receipt)

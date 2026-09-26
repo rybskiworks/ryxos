@@ -70,7 +70,7 @@ Reset requires two complete Xen inventory checks showing both the retained name 
 
 Creation refuses an existing name or UUID, including an exact match. The receipt records intent before creation and records the live domain ID afterward. Failed disk preparation, interrupted creation and ambiguous toolstack results retain state and the GC lease. A failed create with no confirmed domain ID never grants permission to destroy a subsequently observed matching domain.
 
-A graceful shutdown timeout leaves the guest running. Stop never escalates to destruction. After inspecting the guest and accepting the loss of its unsaved writes, destruction is a separate command that rechecks confirmed ownership:
+A graceful shutdown timeout leaves domain absence unconfirmed and retains the state and GC lease. Stop never escalates to destruction. After inspecting the guest and accepting the loss of its unsaved writes, destruction is a separate command that rechecks confirmed ownership:
 
 ```sh
 sudo ryxos-xen-domain force-stop example
@@ -80,7 +80,7 @@ This command preserves the disk and lease, just like a successful graceful stop.
 
 An ambiguous start with no visible domain can be retired using explicit reset only after inspecting the Xen toolstack and ensuring no creation process is still pending. Do not delete its receipt or lease to bypass inspection. If an uncertain domain remains live, recover it through the host's Xen administration procedure; this helper deliberately refuses to infer ownership.
 
-External root tools must not concurrently manipulate reserved managed names or UUIDs. Per-name locks coordinate this helper's operations; Xen's name/ID-based commands cannot atomically protect against another root process recreating a domain between inspection and action. A changing or incomplete plain/long Xen inventory also fails closed; retry after inspecting the toolstack.
+External root tools must not concurrently manipulate reserved managed names or UUIDs. Per-name locks coordinate this helper's operations; Xen's name/ID-based commands cannot atomically protect against another root process recreating a domain between inspection and action. A changing or incomplete plain/long Xen inventory never proves absence. After one authorized shutdown command, the helper retries disagreements between those views until its deadline; it does not repeat the command. Other identity errors still refuse, and admission and reset do not retry ambiguous inventory.
 
 ## Qualification
 

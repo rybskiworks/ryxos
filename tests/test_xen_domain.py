@@ -43,7 +43,7 @@ class FakeXl:
         if arguments[:2] == ("create", "--dryrun"):
             return json.dumps({
                 "c_info": {key: spec[key] for key in ("name", "uuid")},
-                "on_poweroff": "destroy", "on_reboot": "destroy", "on_crash": "destroy",
+                "on_soft_reset": "soft_reset",
             } | self.config_override)
         if arguments[0] == "create":
             receipt = json.loads((domain.state_path(spec["name"]) / "state.json").read_text())
@@ -179,6 +179,43 @@ class LifecycleTests(unittest.TestCase):
                 self.start()
         self.assertEqual(self.actions(), [])
         self.assertFalse(self.leases.exists())
+
+    def test_libxl_omits_destroy_defaults_but_accepts_explicit_destroy(self):
+        parsed = json.loads(self.xl(self.spec, "create", "--dryrun", str(self.config)))
+        actions = ("on_poweroff", "on_reboot", "on_crash")
+        self.assertFalse(any(action in parsed for action in actions))
+        self.assertEqual(parsed["on_soft_reset"], "soft_reset")
+        domain.validate_config(self.spec)
+        self.xl.config_override = {action: "destroy" for action in actions}
+        domain.validate_config(self.spec)
+        self.assertEqual(self.actions(), [])
+        self.assertFalse(self.leases.exists())
+
+    def test_emitted_unsafe_or_malformed_actions_refused_before_lease(self):
+        for action in ("on_poweroff", "on_reboot", "on_crash"):
+            for value in ("restart", "preserve", "coredump_destroy", "soft_reset",
+                          "DESTROY", "destroy ", "", None, False, 1, [], {}):
+                with self.subTest(action=action, value=value):
+                    self.xl.config_override = {action: value}
+                    with self.assertRaisesRegex(domain.Refused, f"resolve to {action}=destroy"):
+                        self.start()
+                    self.assertEqual(self.actions(), [])
+                    self.assertEqual(self.tool_calls, [])
+                    self.assertFalse(self.receipt.exists())
+                    self.assertFalse(self.leases.exists())
+
+    def test_malformed_dryrun_identity_cannot_use_action_defaults(self):
+        for value in (None, [], {}, "invalid", 1):
+            with self.subTest(identity=value):
+                self.xl.config_override = {"c_info": value}
+                with self.assertRaises(domain.Refused):
+                    self.start()
+                self.assertEqual(self.actions(), [])
+                self.assertFalse(self.leases.exists())
+        for value in (None, [], "invalid", 1):
+            with self.subTest(config=value), patch.object(domain, "run_xl", return_value=json.dumps(value)):
+                with self.assertRaisesRegex(domain.Refused, "JSON object"):
+                    domain.validate_config(self.spec)
 
     def test_undeclared_start_and_nonstore_inventory_refused(self):
         with self.assertRaisesRegex(domain.Refused, "currently declared"):
@@ -393,13 +430,102 @@ class LifecycleTests(unittest.TestCase):
     def test_graceful_timeout_never_escalates_and_force_stop_is_separate(self):
         self.start()
         self.xl.graceful = False
-        with self.assertRaisesRegex(domain.Refused, "left running"):
+        with self.assertRaisesRegex(domain.Refused, "absence unconfirmed"):
             domain.stop(self.name, self.declarations)
         self.assertTrue(self.xl.live)
         self.assertFalse(any(call[0] == "destroy" for call in self.actions()))
         domain.stop(self.name, self.declarations, force=True)
         self.assertIn(("destroy", "42"), self.actions())
         self.assertEqual(self.saved()["phase"], "stopped")
+        self.assertIsNotNone(domain.lease_target(self.name))
+
+    def test_shutdown_retries_inventory_gap_until_confirmed_absence(self):
+        self.managed()
+        self.start()
+        disk = self.receipt.parent / "disk.qcow2"
+        before = disk.read_bytes(), domain.disk_identity(disk)
+        stale_plain = self.xl(self.spec, "list")
+        gap_observed = False
+        shutdown_observations = 0
+
+        def replies(spec, *arguments, **kwargs):
+            nonlocal gap_observed, shutdown_observations
+            result = self.xl(spec, *arguments, **kwargs)
+            if any(call[0] == "shutdown" for call in self.actions()):
+                if arguments == ("list",):
+                    shutdown_observations += 1
+                    if not gap_observed:
+                        return stale_plain
+                elif arguments == ("list", "--long") and not gap_observed:
+                    gap_observed = True
+                    self.assertEqual(self.saved()["phase"], "owned")
+                    return "[]"
+            return result
+
+        with patch.object(domain, "run_xl", side_effect=replies):
+            domain.stop(self.name, self.declarations)
+        self.assertTrue(gap_observed)
+        self.assertEqual(shutdown_observations, 2)
+        self.assertEqual([call for call in self.actions() if call[0] != "create"], [("shutdown", "42")])
+        self.assertEqual(self.saved()["phase"], "stopped")
+        self.assertEqual((disk.read_bytes(), domain.disk_identity(disk)), before)
+        self.assertEqual(domain.lease_target(self.name), self.declarations[self.name])
+
+    def test_shutdown_persistent_inventory_gap_retains_receipt_disk_and_lease(self):
+        self.managed()
+        self.start()
+        disk = self.receipt.parent / "disk.qcow2"
+        before = self.receipt.read_bytes(), disk.read_bytes(), domain.disk_identity(disk)
+        live = [dict(self.xl.live[0])]
+
+        def observation(_spec):
+            if not any(call[0] == "shutdown" for call in self.actions()):
+                return live
+            raise domain.InventoryChanged("persistent saved-config omission")
+
+        with patch.object(domain, "read_inventory", side_effect=observation) as inventory:
+            with self.assertRaisesRegex(domain.Refused, "absence unconfirmed"):
+                domain.stop(self.name, self.declarations)
+        self.assertGreater(inventory.call_count, 2)
+        self.assertEqual([call for call in self.actions() if call[0] != "create"], [("shutdown", "42")])
+        self.assertEqual((self.receipt.read_bytes(), disk.read_bytes(), domain.disk_identity(disk)), before)
+        self.assertEqual(domain.lease_target(self.name), self.declarations[self.name])
+
+    def test_inventory_gap_before_shutdown_or_reset_is_not_retried(self):
+        self.managed()
+        self.start()
+        before = self.receipt.read_bytes()
+        for action in (domain.stop, domain.reset):
+            with self.subTest(action=action.__name__):
+                with patch.object(domain, "read_inventory", side_effect=domain.InventoryChanged("incomplete")) as inventory:
+                    with self.assertRaises(domain.InventoryChanged):
+                        action(self.name, self.declarations)
+                self.assertEqual(inventory.call_count, 1)
+                self.assertEqual(self.receipt.read_bytes(), before)
+                self.assertTrue((self.receipt.parent / "disk.qcow2").exists())
+                self.assertEqual(domain.lease_target(self.name), self.declarations[self.name])
+        self.assertFalse(any(call[0] in ("shutdown", "destroy") for call in self.actions()))
+
+    def test_inventory_gap_during_admission_does_not_create_state(self):
+        with patch.object(domain, "read_inventory", side_effect=domain.InventoryChanged("incomplete")) as inventory:
+            with self.assertRaises(domain.InventoryChanged):
+                self.start()
+        self.assertEqual(inventory.call_count, 1)
+        self.assertEqual(self.actions(), [])
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.leases.exists())
+
+    def test_shutdown_identity_conflict_is_not_a_retryable_inventory_gap(self):
+        self.start()
+        before = self.receipt.read_bytes()
+        live = dict(self.xl.live[0])
+        changed = live | {"uuid": "a3f70b01-3a87-4b5a-a77e-6238f6b78123"}
+        with patch.object(domain, "read_inventory", side_effect=[[live], [changed], []]) as inventory:
+            with self.assertRaisesRegex(domain.Refused, "conflicts"):
+                domain.stop(self.name, self.declarations)
+        self.assertEqual(inventory.call_count, 2)
+        self.assertEqual(self.receipt.read_bytes(), before)
+        self.assertEqual([call for call in self.actions() if call[0] != "create"], [("shutdown", "42")])
         self.assertIsNotNone(domain.lease_target(self.name))
 
     def test_identity_and_host_boot_changes_refuse_destructive_actions(self):
@@ -558,8 +684,17 @@ class LifecycleTests(unittest.TestCase):
 
     def test_incomplete_inventory_fails_closed(self):
         replies = ["Name ID Mem VCPUs State Time(s)\nDomain-0 0 2048 2 r----- 0.0\nother 9 512 1 r----- 0.0\n", "[]"]
-        with patch.object(domain, "run_xl", side_effect=replies), self.assertRaisesRegex(domain.Refused, "omitted"):
+        with patch.object(domain, "run_xl", side_effect=replies), self.assertRaisesRegex(domain.InventoryChanged, "omitted"):
             domain.read_inventory(self.spec)
+
+    def test_duplicate_inventory_metadata_is_not_a_retryable_gap(self):
+        entry = {"domid": 9, "config": {"c_info": {"name": "other", "uuid": self.spec["uuid"]}}}
+        replies = ["Name ID Mem VCPUs State Time(s)\nDomain-0 0 2048 2 r----- 0.0\nother 9 512 1 r----- 0.0\n",
+                   json.dumps([entry, entry])]
+        with patch.object(domain, "run_xl", side_effect=replies):
+            with self.assertRaisesRegex(domain.Refused, "duplicate") as caught:
+                domain.read_inventory(self.spec)
+        self.assertNotIsInstance(caught.exception, domain.InventoryChanged)
 
     def test_same_name_lock_refuses_concurrency_independent_names_do_not(self):
         with domain.manager_lock(self.name):
